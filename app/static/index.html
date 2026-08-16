@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>مساعد المحاضرات — Educational AI Platform</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <h1>مساعد المحاضرات</h1>
+    </div>
+    <p class="lecture-name" id="lecture-name">جارِ تحميل المحاضرة…</p>
+  </header>
+
+  <main class="layout">
+
+    <!-- ---------- Video ---------- -->
+    <section class="panel video-panel">
+
+      <video id="video" controls preload="metadata" playsinline></video>
+
+      <!-- Custom strip: the native controls cannot show a segment or a flag -->
+      <div class="timeline" id="timeline" title="اضغط للانتقال">
+        <div class="timeline-range" id="timeline-range" hidden></div>
+        <div class="timeline-flag" id="timeline-flag" hidden>🚩</div>
+        <div class="timeline-playhead" id="timeline-playhead"></div>
+      </div>
+
+      <div class="timeline-legend">
+        <span><i class="swatch swatch-range"></i> الجزء اللي بيجاوب سؤالك</span>
+        <span><i class="swatch">🚩</i> نهاية الجزء — الفيديو بيكمل عادي</span>
+        <span class="clock" id="clock">00:00:00</span>
+      </div>
+
+      <div class="toast" id="toast" hidden></div>
+
+      <div class="segments" id="segments"></div>
+
+    </section>
+
+    <!-- ---------- Chat ---------- -->
+    <section class="panel chat-panel">
+
+      <div class="messages" id="messages">
+        <div class="msg tutor">
+          <p>أهلاً 👋 اسألني أي حاجة من المحاضرة، وهشرحهالك ببساطة بكلام الدكتور
+             نفسه، وهوديك على مكانها بالظبط في الفيديو.</p>
+        </div>
+      </div>
+
+      <div class="suggestions" id="suggestions">
+        <button type="button">العمود الفقري بيتكون من كام فقرة؟</button>
+        <button type="button">عظمة القعبرة اسمها ايه بالانجليزي وليه؟</button>
+        <button type="button">امتى بيتكون الانحناء العنقي؟</button>
+      </div>
+
+      <form class="composer" id="composer">
+        <input
+          id="question"
+          type="text"
+          autocomplete="off"
+          placeholder="اكتب سؤالك عن المحاضرة…">
+        <button type="submit" id="send">اسأل</button>
+      </form>
+
+    </section>
+
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
