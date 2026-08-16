@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from schemas.auth import (
+from app.schemas.auth import (
     LoginRequest,
     LoginResponse,
     UserResponse
@@ -8,7 +8,7 @@ from schemas.auth import (
 
 
 router = APIRouter(
-    prefix="/auth",
+    prefix="/api/auth",
     tags=["Authentication"]
 )
 
