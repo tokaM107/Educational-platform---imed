@@ -42,6 +42,11 @@ def parse_args(argv=None):
         action="store_true",
         help="chunk and print, without embedding or writing",
     )
+    parser.add_argument(
+        "--reembed",
+        action="store_true",
+        help="ignore stored embeddings and compute every chunk again",
+    )
 
     return parser.parse_args(argv)
 
@@ -93,6 +98,27 @@ def ensure_lecture(conn, lecture_id, title, video, doctor_id=None):
         )
 
     conn.commit()
+
+
+def load_existing_embeddings(conn, lecture_id):
+    """text -> stored vector, for chunks already in the database.
+
+    Chunking is deterministic, so re-running ingest after a small transcript
+    edit should only pay for the chunks whose text actually changed.
+    """
+
+    with conn.cursor() as cur:
+
+        cur.execute(
+            """
+            SELECT text, embedding
+            FROM transcript_chunks
+            WHERE lecture_id = %s AND embedding IS NOT NULL
+            """,
+            (lecture_id,),
+        )
+
+        return {row[0]: row[1] for row in cur.fetchall()}
 
 
 def replace_chunks(conn, lecture_id, chunks, embeddings):
@@ -161,15 +187,6 @@ def main(argv=None):
     def progress(done, total):
         print(f"  embedded {done}/{total}")
 
-    print("\nEmbedding (throttled to stay inside the free-tier quota)...")
-
-    embedder = Embedder()
-
-    embeddings = embedder.embed_documents(
-        [chunk.text for chunk in chunks],
-        progress=progress,
-    )
-
     try:
         with connection() as conn:
 
@@ -180,6 +197,34 @@ def main(argv=None):
                 args.video,
                 args.doctor_id,
             )
+
+            # Vectors already in the database are reused as-is; only new or
+            # edited text is sent to the embedding API.
+            stored = {} if args.reembed else load_existing_embeddings(
+                conn, args.lecture_id
+            )
+
+            missing = [chunk for chunk in chunks if chunk.text not in stored]
+
+            print(
+                f"\n{len(chunks) - len(missing)} chunks reuse a stored embedding, "
+                f"{len(missing)} need embedding"
+            )
+
+            if missing:
+
+                print("Embedding (throttled to stay inside the free-tier quota)...")
+
+                vectors = Embedder().embed_documents(
+                    [chunk.text for chunk in missing],
+                    progress=progress,
+                )
+
+                stored.update(
+                    (chunk.text, vector) for chunk, vector in zip(missing, vectors)
+                )
+
+            embeddings = [stored[chunk.text] for chunk in chunks]
 
             replace_chunks(conn, args.lecture_id, chunks, embeddings)
 

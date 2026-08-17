@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass, field
 
 from app.config import get_settings
-from app.services import prompts, retrieval
+from app.services import prompts, query_cache, retrieval
 from app.services.embeddings import Embedder
 from app.services.llm import ChatModel, LLMUnavailable
 
@@ -40,7 +40,9 @@ class TutorService:
         if not question:
             return TutorAnswer(answer=prompts.NOT_IN_LECTURE, grounded=False)
 
-        query_embedding = self.embedder.embed_query(question)
+        # Chunk embeddings live in the database already; only the question has
+        # to be turned into a vector, and even that is cached.
+        query_embedding = query_cache.embed_query(conn, self.embedder, question)
 
         passages = retrieval.search(
             conn,
