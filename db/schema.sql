@@ -36,6 +36,22 @@ CREATE TABLE transcript_chunks (
     embedding vector(1536)       -- match this to your embedding model's output size
 );
 
+-- Cached question embeddings.
+-- The transcript is embedded once by rag/ingest.py; this table does the same
+-- for the query side, so a question that was asked before costs a lookup
+-- instead of an API call. Keyed by model + dimension so changing either does
+-- not silently reuse vectors from a different space.
+CREATE TABLE query_embeddings (
+    id SERIAL PRIMARY KEY,
+    query_hash CHAR(64) NOT NULL,      -- sha256 of the normalised question
+    model VARCHAR(64) NOT NULL,
+    dim INTEGER NOT NULL,
+    query TEXT NOT NULL,
+    embedding vector(1536) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (query_hash, model, dim)
+);
+
 -- Every pause / skip / completion a student does while watching
 CREATE TABLE video_events (
     id SERIAL PRIMARY KEY,
@@ -44,8 +60,8 @@ CREATE TABLE video_events (
     event_type VARCHAR(20) NOT NULL CHECK (
         event_type IN ('play', 'pause', 'seek', 'skip', 'complete', 'rewatch_segment')
     ),
-    video_ts INTEGER,
-    session_id VARCHAR(64),
+    video_ts FLOAT NOT NULL,  -- seconds into the video
+    session_id VARCHAR(64) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -74,3 +90,10 @@ CREATE INDEX idx_video_events_student ON video_events(student_id);
 CREATE INDEX idx_video_events_lecture ON video_events(lecture_id);
 CREATE INDEX idx_question_attempts_student ON question_attempts(student_id);
 CREATE INDEX idx_transcript_chunks_lecture ON transcript_chunks(lecture_id);
+
+-- Approximate nearest-neighbour index for the similarity search.
+-- Without it every question scans the whole table; cosine ops must match the
+-- `<=>` operator used in app/services/retrieval.py.
+CREATE INDEX idx_transcript_chunks_embedding
+    ON transcript_chunks
+    USING hnsw (embedding vector_cosine_ops);
