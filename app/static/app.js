@@ -27,6 +27,8 @@ let marker = null;
 const history = [];
 
 let lectureId = null;
+const sessionId =
+  crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
 
 
 // -------------------------
@@ -47,6 +49,31 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+async function captureEvent(eventType) {
+  if (!lectureId) return;
+
+  try {
+    const response = await fetch("/api/events", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        student_id: 1,
+        lecture_id: lectureId,
+        event_type: eventType,
+        video_ts: video.currentTime,
+        session_id: sessionId,
+      }),
+    });
+
+    if (!response.ok) {
+      console.error("Failed to capture event:", await response.text());
+    }
+  } catch (error) {
+    console.error("Event capture failed:", error);
+  }
+}
 
 // -------------------------
 // Lecture bootstrap
@@ -149,8 +176,23 @@ video.addEventListener("timeupdate", () => {
   }
 });
 
+video.addEventListener("play", () => {
+  captureEvent("play");
+});
+
+video.addEventListener("pause", () => {
+  captureEvent("pause");
+});
+
+video.addEventListener("seeked", () => {
+  captureEvent("seek");
+});
+
+video.addEventListener("ended", () => {
+  captureEvent("complete");
+});
+
 video.addEventListener("loadedmetadata", drawTimeline);
-video.addEventListener("seeked", drawTimeline);
 
 timeline.addEventListener("click", (event) => {
 

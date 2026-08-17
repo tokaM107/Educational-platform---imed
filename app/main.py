@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from google.genai import errors as genai_errors
 
-from app.api import auth, chat, lectures
+from app.api import auth, chat, events, lectures
 from app.config import get_settings
 from app.db import close_pool, open_pool
 
@@ -43,7 +43,7 @@ app = FastAPI(
 app.include_router(auth.router)
 app.include_router(lectures.router)
 app.include_router(chat.router)
-
+app.include_router(events.router)
 
 @app.exception_handler(genai_errors.APIError)
 def handle_genai_error(request: Request, error: genai_errors.APIError):
