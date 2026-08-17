@@ -32,6 +32,7 @@ app/                    FastAPI service
   schemas/              pydantic request/response models
   services/
     embeddings.py       Gemini embeddings (batching, quota throttling)
+    query_cache.py      question embeddings cached in Postgres
     retrieval.py        vector search + grouping hits into video segments
     prompts.py          system instruction + the model's reply contract
     llm.py              generation with retry and a fallback model
@@ -62,6 +63,9 @@ pip install -r requirements.txt
 
 docker compose up -d                       # Postgres 16 + pgvector
 psql "$DATABASE_URL" -f db/schema.sql       # first run only
+
+# existing database created before the vector index / query cache:
+psql "$DATABASE_URL" -f db/migrations/001_vector_index_and_query_cache.sql
 ```
 
 `.env`:
@@ -134,6 +138,26 @@ option; a whole block is too coarse to retrieve. At this lecturer's pace
 ~120 words ≈ 50 seconds of video, which is a useful jump target. Windows never
 cross a block header, so timestamps stay honest — they are interpolated inside
 the block's own time range.
+
+**Embeddings are computed once, never per request.** The transcript is
+embedded by `rag/ingest.py` and lives in `transcript_chunks.embedding
+vector(1536)`; the API only ever reads it. Two consequences worth knowing:
+
+- Re-running ingest reuses the stored vector for every chunk whose text has
+  not changed, so editing part of a transcript re-embeds only the affected
+  chunks (a full re-run of this lecture: 126 embeddings and ~2 minutes the
+  first time, 0 embeddings and 3 seconds after). `--reembed` forces the lot.
+- The one thing that must be embedded at request time is the student's
+  question — a vector search cannot compare text to vectors otherwise — so
+  those are cached in `query_embeddings`, keyed by hash + model + dimension.
+  A repeat question costs a 2 ms lookup instead of a ~400 ms API call and
+  spends no quota.
+
+`transcript_chunks.embedding` is indexed with **HNSW** (`vector_cosine_ops`,
+matching the `<=>` operator used in the search). At 126 rows Postgres still
+prefers a sequential scan because it is genuinely cheaper; the index takes
+over as lectures are added. Existing databases: apply
+`db/migrations/001_vector_index_and_query_cache.sql`.
 
 **Retrieval** (`app/services/retrieval.py`) — cosine distance over
 `transcript_chunks.embedding`, then neighbouring hits are merged into one
