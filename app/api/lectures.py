@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from app.api.deps import get_conn
 from app.config import get_settings
 from app.schemas.lectures import Lecture
+from app.services import subscriptions
 
 
 router = APIRouter(
@@ -96,8 +97,39 @@ def get_lecture(lecture_id: int, conn=Depends(get_conn)):
 
 
 @router.get("/{lecture_id}/video")
-def stream_video(lecture_id: int, conn=Depends(get_conn)):
-    """Full video file. FileResponse handles Range requests, so seeking works."""
+def stream_video(
+    lecture_id: int,
+    student_id: int | None = None,
+    conn=Depends(get_conn),
+):
+    """Full video file. FileResponse handles Range requests, so seeking works.
+
+    Behind the paywall: watching needs a subscription to the lecture's teacher.
+
+    `student_id` identifies the viewer, it does not authenticate them — anyone
+    can send any id, and until there is a session to read the user from, this
+    stops an honest student without a subscription rather than a dishonest one.
+    The check is here so that swapping the parameter for a session user is the
+    only change needed when auth lands. Set ENFORCE_SUBSCRIPTIONS=false to turn
+    it off in development.
+    """
+
+    if get_settings().enforce_subscriptions:
+
+        allowed, doctor_id, title = subscriptions.can_watch(conn, student_id, lecture_id)
+
+        if not allowed:
+            raise HTTPException(
+                # 402: the lecture exists and is fine — it has not been paid for.
+                status_code=402,
+                detail={
+                    "error": "subscription_required",
+                    "message": "محتاج تشترك مع المحاضر عشان تفتح المحاضرة دي.",
+                    "lecture_id": lecture_id,
+                    "lecture_title": title,
+                    "doctor_id": doctor_id,
+                },
+            )
 
     with conn.cursor() as cur:
 
