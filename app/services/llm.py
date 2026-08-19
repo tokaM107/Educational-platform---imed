@@ -34,10 +34,16 @@ class ChatModel:
             api_key=self.settings.require_gemini_api_key()
         )
 
-    def generate(self, system_instruction, user_prompt, response_schema, history=None):
+    def generate(self, system_instruction, user_prompt, response_schema, history=None,
+                 max_output_tokens=2048):
         """One grounded reply, validated against `response_schema`.
 
         `history` is [(role, text), ...] oldest first.
+
+        `max_output_tokens` covers thinking as well as the reply, and a
+        truncated answer is not parsable JSON — it comes back as no reply at
+        all. A few sentences of tutoring fit in the default; a whole weekly
+        report does not, so callers with a larger reply must raise it.
         """
 
         contents = self._build_contents(user_prompt, history)
@@ -47,7 +53,7 @@ class ChatModel:
             # Low temperature: the job is to restate the lecture, not to be
             # creative with it.
             temperature=0.2,
-            max_output_tokens=2048,
+            max_output_tokens=max_output_tokens,
             response_mime_type="application/json",
             response_schema=response_schema,
         )
