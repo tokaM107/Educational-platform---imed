@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>نتائج الامتحان — للمحاضر</title>
+  <link rel="stylesheet" href="/static/report.css">
+  <link rel="stylesheet" href="/static/exam.css">
+</head>
+<body>
+
+  <div class="toolbar" id="toolbar">
+
+    <label class="field">
+      <span>الامتحان</span>
+      <select id="exam"></select>
+    </label>
+
+    <label class="field">
+      <span>درجة النجاح</span>
+      <input id="pass-mark" type="number" min="0" max="100" step="5" value="60">
+    </label>
+
+    <div class="actions">
+      <button type="button" id="print" class="primary">⬇️ تحميل PDF</button>
+      <a class="ghost" href="/">رجوع للمحاضرة</a>
+    </div>
+
+  </div>
+
+  <main class="sheet" id="sheet">
+    <p class="loading">جارِ تحميل النتائج…</p>
+  </main>
+
+  <script src="/static/exam.js"></script>
+</body>
+</html>

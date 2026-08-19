@@ -30,6 +30,131 @@ let lectureId = null;
 const sessionId =
   crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
 
+// There is no login yet, so the app acts as one student throughout: events are
+// recorded against them and the weekly report is theirs. `python -m scripts.enroll
+// list` shows the ids. This is the line that becomes the session user once auth
+// lands — until then it must point at a real, enrolled student.
+const STUDENT_ID = 2;
+
+// Who this browser is acting as. `?as=1` views the site as another user, which
+// is how you see a doctor's notifications until there is a real login.
+const VIEWER_ID =
+  Number(new URLSearchParams(location.search).get("as")) || STUDENT_ID;
+
+document.getElementById("report-link").href =
+  `/static/report.html?student_id=${STUDENT_ID}`;
+
+
+// -------------------------
+// Notifications
+// -------------------------
+//
+// Reports are no longer only a weekly job. Finishing the last lecture of a
+// course, or the last question on a lecture, writes one in the background — and
+// the student and their doctor are told about it here.
+//
+// Polled rather than pushed: "tell them next time they are on the site" needs a
+// list and an unread count, not a socket, and a poll survives the tab being
+// closed while the report was being written.
+
+const NOTIFICATION_POLL_MS = 60000;
+
+const bell = document.getElementById("bell");
+const bellBadge = document.getElementById("bell-badge");
+const inbox = document.getElementById("inbox");
+const inboxList = document.getElementById("inbox-list");
+
+function whenText(iso) {
+
+  const seconds = Math.max((Date.now() - new Date(iso).getTime()) / 1000, 0);
+
+  if (seconds < 90) return "دلوقتي";
+  if (seconds < 3600) return `من ${Math.round(seconds / 60)} دقيقة`;
+  if (seconds < 86400) return `من ${Math.round(seconds / 3600)} ساعة`;
+
+  return `من ${Math.round(seconds / 86400)} يوم`;
+}
+
+function renderInbox(data) {
+
+  bellBadge.textContent = data.unread > 9 ? "9+" : String(data.unread);
+  bellBadge.hidden = data.unread === 0;
+  bell.classList.toggle("has-unread", data.unread > 0);
+
+  if (!data.items.length) {
+    inboxList.innerHTML = '<p class="inbox-empty">مفيش إشعارات لسه.</p>';
+    return;
+  }
+
+  inboxList.innerHTML = data.items.map((item) => `
+    <button type="button" class="inbox-item ${item.read_at ? "" : "unread"}"
+            data-id="${item.id}" data-report="${item.report_id || ""}">
+      <b>${escapeHtml(item.title)}</b>
+      <span class="inbox-body">${escapeHtml(item.body || "")}</span>
+      <span class="inbox-when">${escapeHtml(whenText(item.created_at))}</span>
+    </button>`).join("");
+
+  inboxList.querySelectorAll(".inbox-item").forEach((node) => {
+
+    node.addEventListener("click", async () => {
+
+      const { id, report } = node.dataset;
+
+      // Mark read first: opening the report is a new tab, and the failure mode
+      // to avoid is a notification that stays bold after it has been read.
+      try {
+        await fetch(`/api/notifications/${id}/read`, { method: "POST" });
+      } catch (error) {
+        console.error("could not mark notification read:", error);
+      }
+
+      if (report) {
+        window.open(`/static/report.html?report_id=${report}`, "_blank", "noopener");
+      }
+
+      loadNotifications();
+    });
+  });
+}
+
+async function loadNotifications() {
+
+  try {
+    const response = await fetch(`/api/notifications?user_id=${VIEWER_ID}&limit=15`);
+
+    if (!response.ok) return;
+
+    renderInbox(await response.json());
+
+  } catch (error) {
+    // A missing notification must never disturb the lecture page.
+    console.error("could not load notifications:", error);
+  }
+}
+
+bell.addEventListener("click", () => {
+  const open = inbox.hidden;
+  inbox.hidden = !open;
+  bell.setAttribute("aria-expanded", String(open));
+  if (open) loadNotifications();
+});
+
+document.addEventListener("click", (event) => {
+  if (!inbox.hidden && !inbox.contains(event.target) && event.target !== bell) {
+    inbox.hidden = true;
+    bell.setAttribute("aria-expanded", "false");
+  }
+});
+
+document.getElementById("read-all").addEventListener("click", async (event) => {
+  event.stopPropagation();
+  await fetch(`/api/notifications/read-all?user_id=${VIEWER_ID}`, { method: "POST" });
+  loadNotifications();
+});
+
+loadNotifications();
+setInterval(loadNotifications, NOTIFICATION_POLL_MS);
+
 
 // -------------------------
 // Helpers
@@ -59,12 +184,15 @@ async function captureEvent(eventType) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        student_id: 1,
+        student_id: STUDENT_ID,
         lecture_id: lectureId,
         event_type: eventType,
         video_ts: video.currentTime,
         session_id: sessionId,
       }),
+      // The last event of a session is usually tab_hidden as the tab closes;
+      // keepalive lets that request outlive the page instead of being dropped.
+      keepalive: true,
     });
 
     if (!response.ok) {
@@ -74,6 +202,69 @@ async function captureEvent(eventType) {
     console.error("Event capture failed:", error);
   }
 }
+
+
+// -------------------------
+// Engagement tracking
+// -------------------------
+//
+// Play and pause alone cannot tell "watched for half an hour" apart from
+// "pressed play and left the room", so a heartbeat goes out every 30 seconds
+// while the video is genuinely running, and the page reports when it stops
+// being visible.
+//
+// What visibility can say: this page went hidden. What it cannot say: what the
+// student looked at instead. Another tab, a locked screen and a minimised
+// window are the same event here — it is time away from the lecture, not
+// evidence of anything else.
+
+const HEARTBEAT_MS = 30000;
+
+let heartbeatTimer = null;
+
+function startHeartbeat() {
+
+  // One timer at a time. `play` fires again after every seek and after every
+  // segment jump, and stacking intervals would multiply the traffic.
+  if (heartbeatTimer !== null) return;
+
+  heartbeatTimer = setInterval(() => {
+
+    // Guard the tick as well as the listeners: a background tab throttles
+    // intervals rather than stopping them, and the element can end without a
+    // pause we caught.
+    if (video.paused || video.ended || document.visibilityState === "hidden") {
+      return;
+    }
+
+    captureEvent("heartbeat");
+  }, HEARTBEAT_MS);
+}
+
+function stopHeartbeat() {
+
+  if (heartbeatTimer === null) return;
+
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
+}
+
+document.addEventListener("visibilitychange", () => {
+
+  if (document.visibilityState === "hidden") {
+    stopHeartbeat();
+    captureEvent("tab_hidden");
+    return;
+  }
+
+  captureEvent("tab_visible");
+
+  // A hidden tab does not pause the video element, so playback may well still
+  // be running; only restart the timer if it actually is.
+  if (!video.paused && !video.ended) {
+    startHeartbeat();
+  }
+});
 
 // -------------------------
 // Lecture bootstrap
@@ -92,13 +283,43 @@ async function loadLecture() {
   }
 
   lectureId = lecture.id;
-  video.src = lecture.video_url;
+
+  // The stream is behind the paywall, so say who is watching. This identifies
+  // rather than authenticates — see app/api/subscriptions.py.
+  video.src = `${lecture.video_url}?student_id=${STUDENT_ID}`;
 
   lectureName.textContent =
     `${lecture.title} · ${lecture.chunk_count} مقطع · ${stamp(lecture.duration_ts)}`;
 
   if (!lecture.has_video) {
     lectureName.textContent += " · (ملف الفيديو مش موجود في data/videos)";
+  }
+
+  checkAccess(lecture.id);
+}
+
+async function checkAccess(lecture) {
+  /* A blocked video otherwise just fails to load, which looks like a broken
+     page rather than a locked one. Ask first, and say so plainly. */
+
+  try {
+
+    const response = await fetch(
+      `/api/subscriptions/access?student_id=${STUDENT_ID}&lecture_id=${lecture}`
+    );
+
+    if (!response.ok) return;
+
+    const access = await response.json();
+
+    if (access.allowed) return;
+
+    showToast(
+      "🔒 المحاضرة دي محتاجة اشتراك مع المحاضر. اشترك الأول عشان تقدر تتفرج."
+    );
+
+  } catch (error) {
+    console.error("could not check access:", error);
   }
 }
 
@@ -178,9 +399,18 @@ video.addEventListener("timeupdate", () => {
 
 video.addEventListener("play", () => {
   captureEvent("play");
+  startHeartbeat();
 });
 
 video.addEventListener("pause", () => {
+
+  stopHeartbeat();
+
+  // Reaching the end fires `pause` immediately before `ended`. Recording it
+  // would count every finished lecture as one pause the student never made,
+  // and the weekly report reads pause counts as a sign of difficulty.
+  if (video.ended) return;
+
   captureEvent("pause");
 });
 
@@ -190,6 +420,7 @@ video.addEventListener("seeked", () => {
 
 video.addEventListener("ended", () => {
   captureEvent("complete");
+  stopHeartbeat();
 });
 
 video.addEventListener("loadedmetadata", drawTimeline);

@@ -1,0 +1,137 @@
+/*
+ * Instructor post-exam view. Rides on report.css — same light document, same
+ * meaning for the same colours — and adds only what a results table needs.
+ *
+ * One rule throughout: a percentage that has no denominator prints as "—", not
+ * as 0%. "Nobody answered this" and "everybody got it wrong" are opposite
+ * findings and must never look alike.
+ */
+
+.field input {
+  font: inherit;
+  font-size: 0.88rem;
+  width: 72px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--card);
+  color: var(--ink);
+}
+
+/* ---------- Headline figures ---------- */
+
+.figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; }
+
+.figure { border-inline-start: 3px solid var(--line); padding-inline-start: 13px; }
+.figure.good { border-color: var(--good); }
+.figure.warn { border-color: var(--warn); }
+.figure.bad  { border-color: var(--bad); }
+
+.figure .value {
+  font-size: 1.5rem; font-weight: 700; line-height: 1.25;
+  direction: ltr; unicode-bidi: isolate; text-align: start;
+}
+.figure .name { font-size: 0.86rem; font-weight: 600; }
+.figure .note { margin: 2px 0 0; font-size: 0.76rem; color: var(--ink-soft); line-height: 1.55; }
+
+/* ---------- Score distribution ---------- */
+
+.dist { display: flex; align-items: flex-end; gap: 10px; height: 110px; direction: ltr; }
+.dist-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; height: 100%; }
+.dist-track { flex: 1; width: 100%; display: flex; align-items: flex-end; }
+
+.dist-bar { width: 100%; border-radius: 5px 5px 0 0; background: var(--accent); min-height: 3px; }
+.dist-bar.fail { background: var(--warn); }
+.dist-bar.empty { background: var(--line-soft); }
+
+.dist-label { font-size: 0.7rem; color: var(--ink-faint); direction: ltr; }
+.dist-count { font-size: 0.74rem; font-weight: 700; direction: ltr; }
+
+/* ---------- Question table ---------- */
+
+.qtable { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+.qtable th { text-align: start; font-size: 0.76rem; color: var(--ink-soft); font-weight: 600; padding: 8px 8px; }
+.qtable td { padding: 11px 8px; border-top: 1px solid var(--line-soft); vertical-align: top; }
+.qtable tr.flagged td { background: var(--warn-soft); }
+
+.stem { max-width: 32em; }
+.stem b { font-weight: 600; }
+.qmeta { display: block; margin-top: 3px; font-size: 0.75rem; color: var(--ink-soft); }
+
+.bar-cell { width: 132px; }
+.bar { height: 8px; border-radius: 5px; background: var(--line-soft); overflow: hidden; direction: ltr; }
+.bar span { display: block; height: 100%; border-radius: 5px; background: var(--accent); }
+.bar.low span { background: var(--bad); }
+.bar.high span { background: var(--good); }
+.bar-value { font-size: 0.78rem; margin-top: 3px; direction: ltr; unicode-bidi: isolate; }
+
+.pill {
+  display: inline-block; border-radius: 999px; padding: 1px 9px;
+  font-size: 0.72rem; font-weight: 600; white-space: nowrap;
+}
+.pill.easy { background: var(--good-soft); color: var(--good); }
+.pill.medium { background: var(--accent-soft); color: var(--accent); }
+.pill.hard { background: var(--bad-soft); color: var(--bad); }
+.pill.thin { background: var(--line-soft); color: var(--ink-soft); }
+.pill.mislabelled { background: var(--warn-soft); color: #92400e; }
+
+.num { direction: ltr; unicode-bidi: isolate; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ---------- Roster ---------- */
+
+.roster { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+.roster th { text-align: start; font-size: 0.76rem; color: var(--ink-soft); font-weight: 600; padding: 8px; }
+.roster td { padding: 9px 8px; border-top: 1px solid var(--line-soft); }
+.roster tr.failed td:first-child { border-inline-start: 3px solid var(--bad); }
+.roster tr.incomplete { color: var(--ink-soft); }
+
+@media print {
+  .toolbar { display: none; }
+  .qtable tr.flagged td { background: #fdf1e0; print-color-adjust: exact; }
+  .dist-bar, .bar span { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+}
+
+/* ---------- Option breakdown ---------- */
+/*
+ * Under every stem rather than behind a toggle: "50% chose A" is the most
+ * actionable line on the page and hiding it one click away wastes it.
+ */
+
+.options { margin: 10px 0 0; display: grid; gap: 4px; max-width: 30em; }
+
+.opt {
+  display: grid;
+  grid-template-columns: 18px 76px 44px 1fr;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+}
+
+.opt-key { font-weight: 700; color: var(--ink); direction: ltr; }
+
+.opt-bar { height: 7px; border-radius: 4px; background: var(--line-soft); overflow: hidden; direction: ltr; }
+.opt-bar i { display: block; height: 100%; background: var(--bad); border-radius: 4px; }
+
+/* The right answer is the one bar that is not a warning */
+.opt.right .opt-bar i { background: var(--good); }
+.opt.right .opt-key, .opt.right .opt-text { color: var(--good); font-weight: 600; }
+
+.opt.untouched { opacity: 0.55; }
+.opt.untouched .opt-bar i { background: transparent; }
+
+.opt-pct { font-variant-numeric: tabular-nums; }
+.opt-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.distractor {
+  margin: 8px 0 0;
+  font-size: 0.79rem;
+  line-height: 1.6;
+  color: #92400e;
+  background: var(--warn-soft);
+  border-radius: 8px;
+  padding: 8px 11px;
+  max-width: 34em;
+}
+
+.no-choices { display: block; margin-top: 8px; font-style: italic; }

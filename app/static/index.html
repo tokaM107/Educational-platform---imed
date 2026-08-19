@@ -14,6 +14,29 @@
       <h1>مساعد المحاضرات</h1>
     </div>
     <p class="lecture-name" id="lecture-name">جارِ تحميل المحاضرة…</p>
+    <div class="topbar-actions">
+
+      <!-- Reports arrive here: finishing a module or a lecture's questions
+           writes one in the background and drops a notification. -->
+      <div class="bell-wrap">
+        <button type="button" id="bell" class="bell" aria-label="الإشعارات"
+                aria-expanded="false">
+          🔔<span class="badge" id="bell-badge" hidden>0</span>
+        </button>
+        <div class="inbox" id="inbox" hidden>
+          <div class="inbox-head">
+            <b>الإشعارات</b>
+            <button type="button" id="read-all" class="link">علّم الكل كمقروء</button>
+          </div>
+          <div class="inbox-list" id="inbox-list"></div>
+        </div>
+      </div>
+
+      <a class="report-link" id="report-link" href="/static/report.html" target="_blank"
+         rel="noopener">📄 التقرير الأسبوعي</a>
+      <a class="report-link" href="/static/exam.html" target="_blank"
+         rel="noopener">📊 نتائج الامتحانات</a>
+    </div>
   </header>
 
   <main class="layout">

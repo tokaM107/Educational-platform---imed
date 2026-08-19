@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>التقرير الأسبوعي — مساعد المحاضرات</title>
+  <link rel="stylesheet" href="/static/report.css">
+</head>
+<body>
+
+  <!-- Screen-only controls. `print` hides the lot, so the PDF opens on the report. -->
+  <div class="toolbar" id="toolbar">
+
+    <label class="field">
+      <span>الطالب</span>
+      <select id="subject"></select>
+    </label>
+
+    <div class="week-nav">
+      <button type="button" id="prev" class="ghost">الأسبوع اللي فات</button>
+      <span class="week-label" id="week-label">—</span>
+      <button type="button" id="next" class="ghost">الأسبوع اللي بعده</button>
+    </div>
+
+    <div class="actions">
+      <button type="button" id="print" class="primary">⬇️ تحميل PDF</button>
+      <button type="button" id="rewrite" class="ghost"
+              title="يكتب تعليق الدكتور من جديد على أحدث الأرقام">إعادة كتابة التعليق</button>
+      <a class="ghost" href="/">رجوع للمحاضرة</a>
+    </div>
+
+  </div>
+
+  <main class="sheet" id="sheet">
+    <p class="loading">جارِ تجهيز التقرير…</p>
+  </main>
+
+  <script src="/static/report.js"></script>
+</body>
+</html>
