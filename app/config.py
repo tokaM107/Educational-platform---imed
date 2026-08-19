@@ -57,6 +57,26 @@ class Settings:
         # already half-spoken when the video starts.
         self.segment_lead_in = int(os.getenv("SEGMENT_LEAD_IN", "3"))
 
+        # --- Access ---
+
+        # Whether a lecture video requires a subscription to its teacher. The
+        # check identifies the student from a request parameter, which is not
+        # authentication — anyone can send any id — so this is a paywall, not a
+        # security boundary, until there is a session to read the user from.
+        self.enforce_subscriptions = (
+            os.getenv("ENFORCE_SUBSCRIPTIONS", "true").strip().lower()
+            not in ("0", "false", "no", "off")
+        )
+
+        # --- Weekly report ---
+
+        # A week is seven *local* days. In UTC, a 23:00 Cairo session lands on
+        # the next day, which silently moves study onto the wrong day and can
+        # push it out of the reported week altogether. Any IANA zone name works;
+        # an unknown one falls back to UTC with a warning.
+        self.report_timezone = os.getenv("REPORT_TIMEZONE", "Africa/Cairo")
+        self.report_week_days = int(os.getenv("REPORT_WEEK_DAYS", "7"))
+
         # --- Chunking (offline pipeline) ---
         self.chunk_words = int(os.getenv("CHUNK_WORDS", "120"))
         self.overlap_words = int(os.getenv("OVERLAP_WORDS", "25"))
