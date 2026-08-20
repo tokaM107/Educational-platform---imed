@@ -1,7 +1,7 @@
 """Course structure and enrolment: the real data a weekly report needs.
 
     python -m scripts.enroll list
-    python -m scripts.enroll course --title "تشريح ١" --doctor-id 1
+    python -m scripts.enroll course --title "Anatomy 1" --doctor-id 1
     python -m scripts.enroll assign --course-id 1 --lectures 1,2,3
     python -m scripts.enroll add --student-id 2 --course-id 1
     python -m scripts.enroll rename --user-id 1 --name "د. سامي"
@@ -192,16 +192,37 @@ def assign(conn, course_id, lecture_ids):
 
     with conn.cursor() as cur:
 
-        cur.execute("SELECT title FROM courses WHERE id = %s", (course_id,))
+        cur.execute(
+            "SELECT title, doctor_id FROM courses WHERE id = %s", (course_id,)
+        )
         row = cur.fetchone()
 
         if row is None:
             print(f"No course {course_id}.")
             return 1
 
+        title, course_doctor = row
+
+        # Which of these were recorded by somebody else. Asked before the update
+        # because the answer stops existing after it, and moving a lecture
+        # between doctors is worth saying out loud rather than doing quietly.
         cur.execute(
-            "UPDATE lectures SET course_id = %s WHERE id = ANY(%s) RETURNING id",
-            (course_id, lecture_ids),
+            """
+            SELECT l.id, u.name
+            FROM lectures l JOIN users u ON u.id = l.doctor_id
+            WHERE l.id = ANY(%s) AND l.doctor_id <> %s
+            """,
+            (lecture_ids, course_doctor),
+        )
+        reassigned = cur.fetchall()
+
+        # doctor_id travels with course_id. A lecture inside a course is taught
+        # by that course's doctor — the database enforces it (migration 011), so
+        # setting course_id alone here would be rejected, not merely untidy.
+        cur.execute(
+            "UPDATE lectures SET course_id = %s, doctor_id = %s "
+            "WHERE id = ANY(%s) RETURNING id",
+            (course_id, course_doctor, lecture_ids),
         )
         moved = [found[0] for found in cur.fetchall()]
 
@@ -209,7 +230,10 @@ def assign(conn, course_id, lecture_ids):
 
     missing = sorted(set(lecture_ids) - set(moved))
 
-    print(f"course {course_id} «{row[0]}» now includes lecture(s) {moved or '—'}")
+    print(f"course {course_id} «{title}» now includes lecture(s) {moved or '—'}")
+
+    for lecture_id, was in reassigned:
+        print(f"  lecture {lecture_id} moved from «{was}» to the course's doctor")
 
     if missing:
         print(f"  no such lecture(s): {missing}")
