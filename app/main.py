@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from google.genai import errors as genai_errors
 
 from app.api import (auth, chat, events, exams, lectures, notifications,
-                     questions, reports, subscriptions)
+                     questions, reports, search, subscriptions)
 from app.config import get_settings
 from app.db import close_pool, open_pool
 
@@ -60,6 +60,7 @@ app.include_router(reports.router)
 app.include_router(notifications.router)
 app.include_router(exams.router)
 app.include_router(subscriptions.router)
+app.include_router(search.router)
 
 @app.exception_handler(genai_errors.APIError)
 def handle_genai_error(request: Request, error: genai_errors.APIError):
