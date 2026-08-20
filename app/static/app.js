@@ -275,7 +275,14 @@ async function loadLecture() {
   const response = await fetch("/api/lectures");
   const lectures = await response.json();
 
-  const lecture = lectures.find((item) => item.chunk_count > 0) || lectures[0];
+  // `?lecture_id=` is how the search assistant links to a lecture. An id that
+  // no longer exists falls through to the default rather than showing nothing.
+  const wanted = Number(new URLSearchParams(location.search).get("lecture_id"));
+
+  const lecture =
+    (wanted && lectures.find((item) => item.id === wanted)) ||
+    lectures.find((item) => item.chunk_count > 0) ||
+    lectures[0];
 
   if (!lecture) {
     lectureName.textContent = "مفيش محاضرات — شغّل python -m rag.ingest الأول";

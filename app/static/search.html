@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>البحث الذكي — تجربة</title>
+  <link rel="stylesheet" href="/static/report.css">
+  <link rel="stylesheet" href="/static/search.css">
+</head>
+<body>
+
+  <div class="toolbar">
+    <strong class="brand">🔎 البحث الذكي</strong>
+    <span class="hint">اكتب سؤالك زي ما الطالب هيكتبه بالظبط</span>
+    <div class="actions">
+      <a class="ghost" href="/">رجوع للمحاضرة</a>
+    </div>
+  </div>
+
+  <main class="page">
+
+    <form class="ask" id="ask">
+      <input id="query" type="text" autocomplete="off" spellcheck="false"
+             placeholder="عايز محاضرات دكتور أحمد حسن في الفسيولوجي">
+      <button type="submit" id="send" class="primary">ابحث</button>
+    </form>
+
+    <section class="samples">
+      <h2>حالات جاهزة للتجربة</h2>
+      <div class="chips" id="samples"></div>
+    </section>
+
+    <section id="answer" hidden>
+
+      <div class="verdict" id="verdict"></div>
+
+      <div class="clarify" id="clarify-box" hidden>
+        <p id="clarify-text"></p>
+        <form class="ask small" id="clarify-form">
+          <input id="clarify-input" type="text" autocomplete="off"
+                 placeholder="ردّك على السؤال…">
+          <button type="submit" class="primary">كمّل</button>
+        </form>
+      </div>
+
+      <div class="results" id="results"></div>
+
+      <details class="panel" id="plan-panel">
+        <summary>اللي الموديل فهمه</summary>
+        <div id="plan"></div>
+      </details>
+
+      <details class="panel" id="debug-panel">
+        <summary>تفاصيل للمطوّر</summary>
+        <div id="debug"></div>
+      </details>
+
+    </section>
+
+  </main>
+
+  <script src="/static/search.js"></script>
+</body>
+</html>

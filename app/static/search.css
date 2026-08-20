@@ -1,0 +1,133 @@
+/*
+ * The search test bench. Rides on report.css for the palette and the toolbar.
+ *
+ * The page exists to answer one question while you type queries at it: did the
+ * model read the sentence correctly, and did the catalog agree? So the filters
+ * it extracted are shown next to the rows they returned, always, not hidden
+ * behind a debug flag — a result list on its own cannot tell you whether a miss
+ * was the model misreading "سنة تانية" or the catalog genuinely being empty.
+ */
+
+.page { max-width: 900px; margin: 0 auto; padding: 22px 18px 60px; }
+
+.brand { font-size: 0.95rem; }
+.hint { font-size: 0.8rem; color: var(--ink-faint); }
+
+/* ---------- Ask ---------- */
+
+.ask { display: flex; gap: 9px; margin-bottom: 22px; }
+
+.ask input {
+  flex: 1; font: inherit; font-size: 0.95rem; padding: 12px 15px;
+  border: 1px solid var(--line); border-radius: 11px;
+  background: var(--card); color: var(--ink);
+}
+.ask input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+.ask button { padding: 12px 22px; border-radius: 11px; font-size: 0.9rem; cursor: pointer; }
+.ask button[disabled] { opacity: 0.55; cursor: wait; }
+.ask.small input, .ask.small button { padding: 9px 13px; font-size: 0.87rem; }
+
+/* ---------- Samples ---------- */
+
+.samples h2 { font-size: 0.82rem; font-weight: 600; color: var(--ink-soft); margin: 0 0 9px; }
+.chips { display: flex; flex-wrap: wrap; gap: 7px; }
+
+.chip {
+  font: inherit; font-size: 0.82rem; padding: 6px 12px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: var(--card); color: var(--ink-soft);
+}
+.chip:hover { border-color: var(--accent); color: var(--accent); }
+.chip .n { font-size: 0.72rem; color: var(--ink-faint); margin-inline-end: 5px; }
+
+/* ---------- Verdict ---------- */
+
+.verdict {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  margin: 26px 0 14px; padding-inline-start: 13px;
+  border-inline-start: 3px solid var(--line);
+}
+.verdict .word { font-size: 1.05rem; font-weight: 700; }
+.verdict .said { font-size: 0.82rem; color: var(--ink-soft); }
+
+.verdict.go      { border-color: var(--good); }
+.verdict.go      .word { color: var(--good); }
+.verdict.choose  { border-color: var(--accent); }
+.verdict.choose  .word { color: var(--accent); }
+.verdict.none    { border-color: var(--warn); }
+.verdict.none    .word { color: var(--warn); }
+.verdict.clarify { border-color: var(--accent); }
+.verdict.clarify .word { color: var(--accent); }
+.verdict.unsupported, .verdict.error { border-color: var(--bad); }
+.verdict.unsupported .word, .verdict.error .word { color: var(--bad); }
+
+/* ---------- Clarify ---------- */
+
+.clarify {
+  background: var(--accent-soft); border: 1px solid var(--line);
+  border-radius: 12px; padding: 14px 16px; margin-bottom: 16px;
+}
+.clarify p { margin: 0 0 10px; font-size: 0.95rem; font-weight: 600; }
+
+/* ---------- Results ---------- */
+
+.results { display: flex; flex-direction: column; gap: 9px; }
+
+.hit {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; padding: 13px 15px; text-decoration: none; color: inherit;
+}
+.hit:hover { border-color: var(--accent); }
+.hit.dead { opacity: 0.7; }
+.hit.dead:hover { border-color: var(--line); }
+
+.hit .body { flex: 1; min-width: 0; }
+/* The catalog is English inside an Arabic page. Without an explicit bidi rule
+ * the browser reorders a title against its own direction — "[TEST] Glycolysis"
+ * renders as "Glycolysis [TEST]", which looks like a different lecture.
+ * `plaintext` picks the direction per line from its own first strong character,
+ * so an English title reads LTR and an Arabic one still reads RTL. */
+.hit .name,
+.hit .meta { unicode-bidi: plaintext; text-align: start; }
+
+.hit .name { font-size: 0.95rem; font-weight: 600; }
+.hit .meta { margin-top: 3px; font-size: 0.78rem; color: var(--ink-soft); }
+.hit .meta span + span::before { content: " · "; color: var(--ink-faint); }
+
+.hit .badge {
+  font-size: 0.7rem; font-weight: 700; letter-spacing: 0.04em;
+  padding: 3px 8px; border-radius: 6px; text-transform: uppercase;
+  background: var(--line-soft); color: var(--ink-soft);
+}
+.hit .go { font-size: 0.78rem; color: var(--accent); white-space: nowrap; }
+.hit .go.off { color: var(--ink-faint); }
+
+/* ---------- Panels ---------- */
+
+.panel {
+  margin-top: 16px; background: var(--card);
+  border: 1px solid var(--line); border-radius: 12px; padding: 12px 15px;
+}
+.panel summary { cursor: pointer; font-size: 0.84rem; font-weight: 600; color: var(--ink-soft); }
+.panel[open] summary { margin-bottom: 11px; }
+
+.row { display: flex; gap: 9px; font-size: 0.83rem; margin-bottom: 7px; align-items: baseline; }
+.row .key { color: var(--ink-faint); min-width: 74px; }
+.row .val { flex: 1; }
+
+.filter {
+  display: inline-block; font-size: 0.79rem; padding: 4px 9px; margin: 0 0 5px;
+  border-radius: 7px; background: var(--accent-soft); color: var(--ink);
+  direction: ltr; unicode-bidi: isolate;
+}
+.filter .from { color: var(--ink-soft); }
+.filter.cut { background: var(--bad-soft); }
+
+.note { font-size: 0.79rem; color: var(--warn); margin: 0 0 5px; direction: ltr; unicode-bidi: isolate; text-align: start; }
+
+pre.sql {
+  margin: 0; padding: 11px 13px; overflow-x: auto;
+  background: var(--line-soft); border-radius: 9px;
+  font-size: 0.75rem; line-height: 1.6; direction: ltr; text-align: start;
+}
