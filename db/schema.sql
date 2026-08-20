@@ -42,7 +42,10 @@ CREATE TABLE courses (
     academic_year SMALLINT CONSTRAINT courses_academic_year_check
         CHECK (academic_year IS NULL OR academic_year BETWEEN 1 AND 7),
     title VARCHAR(255) NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Redundant for uniqueness (id alone is already unique). It exists so
+    -- lectures can point a composite foreign key at the (course, doctor) pair.
+    CONSTRAINT courses_id_doctor_key UNIQUE (id, doctor_id)
 );
 
 -- A block of lectures inside a course, e.g. "Cardiovascular" in Physiology I.
@@ -69,6 +72,21 @@ CREATE TABLE modules (
 -- course_id is kept alongside module_id on purpose. Enrolment, subscriptions,
 -- reports and the engagement replay all hang off course->lecture, and none of
 -- them should have to go through a module that may not exist.
+--
+-- doctor_id is not free to disagree with the course. A lecture inside a course
+-- is taught by that course's doctor, and the composite foreign key says so:
+-- the (course_id, doctor_id) pair has to be a pair that exists on courses.
+--
+-- The invariant is here rather than in the writers because it lives *between*
+-- two of them — one moves a course to a new doctor, another attaches a lecture
+-- to a course, and each is correct on its own while the pair drifts apart. That
+-- is what happened; see db/migrations/010 and 011.
+--
+-- ON UPDATE CASCADE is the working half: re-assigning a course to another
+-- doctor carries that course's lectures with it in the same statement.
+--
+-- MATCH SIMPLE means the check is skipped when course_id IS NULL, so a
+-- standalone lecture still keeps whoever recorded it.
 CREATE TABLE lectures (
     id SERIAL PRIMARY KEY,
     doctor_id INTEGER NOT NULL REFERENCES users(id),
@@ -76,7 +94,10 @@ CREATE TABLE lectures (
     module_id INTEGER REFERENCES modules(id) ON DELETE SET NULL,
     title VARCHAR(255) NOT NULL,
     video_url TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT lectures_course_doctor_fkey
+        FOREIGN KEY (course_id, doctor_id) REFERENCES courses (id, doctor_id)
+        ON UPDATE CASCADE
 );
 
 -- Who is registered for what
