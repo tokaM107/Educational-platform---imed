@@ -33,11 +33,25 @@ app/                    FastAPI service
   services/
     embeddings.py       Gemini embeddings (batching, quota throttling)
     query_cache.py      question embeddings cached in Postgres
+    engagement.py       video_events -> watch time + coverage (pure, tested)
+    report.py           a student's week: engagement + questions + narrative
+    report_cache.py     stored narratives, keyed by the figures behind them
+    exam_stats.py       post-exam aggregation for the instructor (no model)
+    subscriptions.py    paid access: which teachers a student may watch
+    report_store.py     reports a completion froze, kept as issued
+    triggers.py         which completions earn a report, and the background job
+    notifications.py    how a report reaches the student and their doctor
     retrieval.py        vector search + grouping hits into video segments
     prompts.py          system instruction + the model's reply contract
     llm.py              generation with retry and a fallback model
     tutor.py            the RAG orchestration
   static/               demo UI (chat + player with segment flag)
+    report.html/.js/.css  the weekly report, printed to PDF by the browser
+
+scripts/                operational CLIs
+  enroll.py             courses, lecture assignment, enrolment (what a report counts)
+  generate_weekly_reports.py  write everyone's narrative ahead of time (optional)
+  remove_demo_data.py   take fabricated demo rows back out of a database
 
 rag/                    offline pipelines, not imported by the API
   transcribe_whisper.py video -> audio chunks -> transcript (HF/fal Whisper)
@@ -48,7 +62,7 @@ rag/                    offline pipelines, not imported by the API
 
 db/schema.sql           tables, including transcript_chunks(embedding vector)
 data/                   videos, audio chunks, transcripts
-tests/                  pure-logic tests: chunking + segment building
+tests/                  pure-logic tests: chunking, segments, engagement
 ```
 
 `app/` and `rag/` share `app.config` and `app.services`, so the ingest
@@ -66,15 +80,58 @@ psql "$DATABASE_URL" -f db/schema.sql       # first run only
 
 # existing database created before the vector index / query cache:
 psql "$DATABASE_URL" -f db/migrations/001_vector_index_and_query_cache.sql
+
+# existing database created before the engagement event types:
+psql "$DATABASE_URL" -f db/migrations/002_engagement_events.sql
+
+# existing database created before courses / enrolments:
+psql "$DATABASE_URL" -f db/migrations/003_courses_and_enrollments.sql
+
+# existing database created before stored report narratives:
+psql "$DATABASE_URL" -f db/migrations/004_report_narratives.sql
+
+# existing database created before event-triggered reports / notifications:
+psql "$DATABASE_URL" -f db/migrations/005_event_reports_and_notifications.sql
+
+# existing database created before distractor analysis / subscriptions:
+psql "$DATABASE_URL" -f db/migrations/006_attempt_selected_option.sql
+psql "$DATABASE_URL" -f db/migrations/007_subscriptions.sql
 ```
 
-`.env`:
+**Applying 007 locks every video.** Watching needs a subscription to the
+lecture's teacher, so existing students need one granting before they can play
+anything:
 
+```bash
+python -m scripts.enroll subscribe --student-id 2 --doctor-id 1
 ```
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/medical_ai
-GEMINI_API_KEY=...
-HF_TOKEN=...        # only for rag/transcribe_whisper.py
+
+`.env` also takes `REPORT_TIMEZONE` (default `Africa/Cairo`). A week is seven
+*local* days: in UTC, a 23:00 session lands on the next day, moving study onto
+the wrong day of the report and, at the week's edges, out of it entirely.
+
+Before a report can be built, two things have to be true, and both are real
+administrative data rather than anything invented: the lectures have to belong to
+a course, and the student has to be enrolled on it. That is what the report counts
+"3 of 5 lectures" against.
+
+```bash
+python -m scripts.enroll list                    # what exists, and what is missing
+python -m scripts.enroll course --title "Anatomy 1" --doctor-id 1
+python -m scripts.enroll assign --course-id 1 --lectures 1,2,3
+python -m scripts.enroll add --student-id 2 --course-id 1
+python -m scripts.enroll rename --user-id 1 --name "..."   # fix placeholder names
 ```
+
+`enroll list` is the one to run first: it prints every user, course and lecture,
+and tells you which lectures are in no course and which have no transcript, both
+of which leave holes in a report.
+
+**There is no seed script, and no fabricated study.** Every figure in a report
+comes from `video_events` the player recorded while a student was actually in
+front of a lecture, and from questions they actually answered. A student who has
+not watched anything gets a report that says exactly that, which is the truth and
+more useful than an invented week.
 
 ## Ingest a lecture
 
@@ -84,7 +141,7 @@ python rag/transcribe_cohere.py
 
 # 2. transcript -> chunks -> embeddings -> Postgres
 python -m rag.ingest --lecture-id 1 \
-    --title "الجهاز الهيكلي — Skeletal System" \
+    --title "Skeletal System" \
     --transcript data/transcripts/transcript.txt \
     --video sample1.mp4
 
@@ -109,6 +166,17 @@ uvicorn app.main:app --reload
 | `POST /api/chat` | question → grounded answer + video segments + citations |
 | `GET /api/lectures` | lectures with chunk count and duration |
 | `GET /api/lectures/{id}/video` | the whole video, with byte-range support so seeking works |
+| `POST /api/events` | record one video event (insert only, deliberately trivial) |
+| `GET /api/events/analytics` | watch time / time away / session length for a session |
+| `GET /api/reports/weekly` | a student's week on a course, with a generated narrative |
+| `GET /api/reports/subjects` | every student/course a report can be built for |
+| `GET /api/reports/{id}` | a report a completion produced, as it was issued |
+| `GET /api/exams` | lectures that have questions, for the instructor picker |
+| `GET /api/exams/{lecture_id}` | post-exam statistics for one lecture |
+| `POST /api/subscriptions` | give a student paid access to a teacher |
+| `GET /api/subscriptions/access` | may this student watch this lecture? |
+| `GET /api/notifications` | one user's inbox, with the unread count |
+| `POST /api/notifications/{id}/read` | mark one read |
 | `POST /api/auth/login` | stub, unchanged |
 
 ```bash
@@ -177,6 +245,203 @@ rather than three that point at the same minute. Playback backs up
 Layer 3 matters: measured on this lecture, on-topic hits sit at 0.25–0.31 and
 an off-topic question ("what raises stroke risk?") still lands at 0.39, so
 distance alone cannot separate them.
+
+**Engagement tracking** (`app/static/app.js` → `video_events` →
+`app/services/engagement.py`) — the player records `play` / `pause` / `seek` /
+`complete`, plus a `heartbeat` every 30 seconds *while the video is actually
+running*, plus `tab_hidden` / `tab_visible`. The heartbeat is what separates
+"watched for half an hour" from "pressed play and left the room"; without it a
+play/pause pair says nothing about the time in between.
+
+Watch time is then **reconstructed**, never subtracted. `last video_ts - first
+video_ts` is the tempting answer and it is wrong: a jump from 00:01:40 to
+00:08:20 adds six minutes of video position and zero seconds of watching, and
+rewatching a stretch adds nothing at all. So `engagement.replay()` walks the
+session in real time — `created_at` gives the elapsed seconds, the event types
+say whether the video was running through them — and adds up the playback
+intervals. A gap larger than three heartbeats is capped, because it means
+events went missing (sleeping laptop, dropped network) rather than that
+somebody watched in silence.
+
+Four numbers, deliberately never merged:
+
+| | |
+| --- | --- |
+| `watch_time_seconds` | the video was playing |
+| `session_duration_seconds` | first event to last, pauses and absences included |
+| `time_away_seconds` | the lecture page was hidden |
+| `lecture_duration` | the lecture's own length |
+
+A 180-minute session on a 75-minute lecture with 68 minutes watched and 42
+minutes away is all four at once.
+
+What `tab_hidden` means is exactly "this page stopped being visible". A
+switched tab, a locked screen and a minimised window are the same event, and
+nothing here identifies what the student looked at instead — so it is reported
+as time away from the lecture, not as distraction.
+
+`video_events` is indexed on `(student_id, lecture_id, session_id, created_at)`,
+which is the analytics query's exact shape: one ordered range scan instead of a
+filter-and-sort. As with the HNSW index, a table this small still gets a
+sequential scan until it grows.
+
+**The weekly report** (`app/services/report.py`, `/static/report.html`) — one
+student, one course, seven days, assembled from rows that already exist. Open
+it from the 📄 button in the player, or at
+`/static/report.html?student_id=<id>`.
+
+The page reads as prose with the figures set into it, not as a grid of numbers:
+"شفت 45% من مادة الأسبوع" says something a tile reading `45.1` does not. The
+week is drawn as a row of bars, coverage as a ring, and where the time went as
+one stacked bar — each replacing several numbers nobody would have compared by
+eye. Per-lecture numbers sit behind a "التفاصيل" toggle, and are opened
+automatically for printing.
+
+The measurements come from replaying the week's events per lecture; the only
+generated part is the closing narrative, and it is generated **from the
+measured numbers**, not from the raw events. Three of them are worth knowing:
+
+- **coverage** — how much of a lecture was seen at least once, rewatching
+  counted once. This is the number that catches a lecture "completed" by
+  skipping through it: the seeded demo has one at 100% finished and 28%
+  covered.
+- **parts never watched / parts replayed** — the holes and the overlaps in the
+  coverage, reported as timestamps. A rewound stretch is the strongest signal
+  in the whole table: it is the student telling you which explanation did not
+  land the first time.
+- **time away** — carried through from `tab_hidden` with its meaning intact.
+  The prompt forbids the model from reading it as distraction, the page says
+  so under every occurrence, and the footnote says it again.
+
+**Narratives are stored, not regenerated.** The numbers are recomputed on every
+request because a replay costs milliseconds. The narrative costs a model call of
+about half a minute, and `report_narratives` keeps it against a hash of the exact
+figures it was written from (the same trick `query_embeddings` uses for
+questions). So while the week is still running and the student keeps watching,
+the fingerprint moves and the narrative is rewritten; once the week closes it
+settles and the report becomes a fixed document. That last property is the point
+— a report a student is meant to act on cannot give different advice on every
+refresh. Measured here: 25 s to generate, **12 ms** to serve afterwards.
+
+**Instructor post-exam view** (`app/services/exam_stats.py`,
+`/static/exam.html`) — how the class did on one lecture's questions: average
+score, per-question correct %, per-topic breakdown, score distribution, and the
+roster. Every figure is a `GROUP BY` over `question_attempts` joined to
+`questions`. **No model is involved**, so the page answers in ~20 ms and says the
+same thing every time it is opened; prose commentary can be layered on later if
+the numbers turn out not to speak for themselves.
+
+Two definitions kept apart, because "score" is ambiguous:
+
+| | |
+| --- | --- |
+| `score` | correct ÷ **every** question in the exam — unanswered counts as wrong, which is what a mark means |
+| `accuracy` | correct ÷ what the student actually attempted — fair to a partial sitting, and the right lens on a *question* |
+
+`correct_percent` counts a student right if any attempt was (matching the weekly
+report), and `first_attempt_percent` keeps the stricter reading beside it — the
+gap between the two is where a question needed a second think. Figures cover the
+enrolled cohort; attempts from anyone else are excluded and counted in
+`attempts_from_non_enrolled`, so one stray row cannot move an average.
+
+**Distractor analysis.** `question_attempts.selected_option` records the choice
+itself, so the view shows which wrong answer the class went for. That is the
+difference between *"38% got it wrong"* — which might just be a hard question —
+and *"50% of them chose A"*, which says one distractor is teaching something
+false or the stem is ambiguous. A wrong option taken by a quarter of the answers
+or more is called out; wrong answers spread evenly across the distractors are
+not, because that is a hard question and nothing is broken. Options nobody picked
+are still listed: a distractor no one touches means the question is really a
+three-way choice.
+
+Attempts recorded before that column existed carry no choice, so every
+distribution reports the count it was built from and never passes off a partial
+picture as a complete one.
+
+**`/api/exams/*` hands out the answer key** — a distractor table is unreadable
+without marking which option was right. It is an instructor endpoint and needs
+authentication before launch; today nothing stops a student calling it.
+
+## Paid access
+
+A subscription is per **teacher** and unlocks everything they publish. It is
+separate from enrolment because the two change independently: a subscription
+lapses without un-enrolling anybody, and a student subscribed to a teacher may be
+enrolled on none, one or several of that teacher's courses.
+
+Enforced in two places — `GET /api/lectures/{id}/video` answers **402** without
+one, and `scripts.enroll add` refuses to enrol a student on a course whose
+teacher they do not pay for, so nobody is enrolled on something they cannot open.
+`GET /api/subscriptions/access` lets the UI show a lock before the student
+presses play.
+
+```bash
+python -m scripts.enroll subscribe   --student-id 2 --doctor-id 1
+python -m scripts.enroll unsubscribe --student-id 2 --doctor-id 1
+```
+
+**This is a paywall, not a security boundary.** The check identifies the viewer
+from a request parameter, and anyone can send any id — as is true of the whole
+API today. The check lives in the right place, so swapping the parameter for a
+session user is the only change needed when auth lands. `ENFORCE_SUBSCRIPTIONS=false`
+turns it off in development.
+
+Two things `subscriptions` deliberately does not record, both of which need a
+column the day the product needs them: **when access ends** (no `expires_at`, so
+a row means access until it is deleted) and **what was paid** (no amount or
+processor reference — this records the entitlement a payment produced, not the
+payment).
+
+**Reports also fire on what a student does, not only on the calendar.** The
+pipeline is the same one — Stage 1 replays `video_events` into figures, Stage 2
+hands those figures to the model — and only the trigger differs:
+
+| Trigger | Report | Scope |
+| --- | --- | --- |
+| a `complete` event that finishes the course's last lecture | `module` | the whole course, all time |
+| an answer that finishes a lecture's last question | `exam` | the course, framed on that lecture |
+
+Both run in FastAPI `BackgroundTasks`, so the student's request returns before
+the model is called — measured: **8 ms** to record the event, the report lands
+about half a minute later. Because they run after the response they cannot use
+the request's pooled connection, so each opens its own, and every failure is
+swallowed and logged: a report that did not get written must never look like a
+lost quiz answer.
+
+A completion report is **frozen** in `reports`. "You finished the module"
+describes an instant; recomputed a fortnight later, after the student had gone
+back and rewatched half of it, the same query would quietly rewrite history.
+Uniqueness is enforced by an index, because `complete` fires again every time
+somebody replays the last minute.
+
+Both the student and the doctor who teaches the course get a row in
+`notifications`, worded for who is reading — *«خلّصت المقرر — تقريرك جاهز»*
+against *«أحمد خلّص «Anatomy 1»»*. The site polls the inbox from the 🔔 in the
+player and opens the frozen report from there. Polling, not a socket: the
+requirement is "tell them next time they are on the site", which a table with a
+`read_at` column does exactly, with nothing to keep running and nothing lost if
+the browser was closed while the report was being written.
+
+**A weekly report is produced when someone asks for it.** Pressing 📄 in the player opens
+the page, which draws the measured half immediately and writes the narrative if
+there is not already one for those figures — roughly half a minute the first time,
+milliseconds afterwards. No batch run is required for a report to exist.
+
+`scripts/generate_weekly_reports.py` is an optional warm-up: run it after the week
+closes and every student's narrative is already stored before anyone opens it. It
+is safe to re-run — a narrative whose figures have not moved is left alone — and
+exits non-zero if any student failed, so a cron wrapper can alert on it. Two tabs
+opening the same uncached report will each ask the model once; the second write
+simply replaces the first, so it costs a duplicate call rather than a wrong
+answer.
+
+If the model is unreachable the report still returns every number, and falls back
+to the stored narrative for that week even if the figures have since moved,
+saying so. `?narrative=false` skips the model entirely; `?refresh=true` rewrites.
+
+**PDF** is the browser's own "Save as PDF" behind a `window.print()` button,
+with a `@media print` stylesheet — no PDF library on the server, and no second
+renderer that could drift out of step with the page.
 
 **Degraded mode** — if Gemini is overloaded, generation retries, then falls
 back to `CHAT_FALLBACK_MODEL`. If that fails too, the student still gets the

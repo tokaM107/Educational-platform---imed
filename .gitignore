@@ -221,3 +221,7 @@ __marimo__/
 .DS_Store
 
 .ــinit__
+
+# Local media / dataset files
+data/audios/
+data/videos/
