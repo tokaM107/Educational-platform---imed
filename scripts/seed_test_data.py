@@ -50,13 +50,13 @@ EMAIL_DOMAIN = "example.com"
 DAYS = 14
 
 
-# Two of the three share the first name أحمد, and both teach Physiology, so
+# Two of the three share the first name Ahmed, and both teach Physiology, so
 # "عايز محاضرات دكتور أحمد في الفسيولوجي" is genuinely ambiguous and the
 # assistant has to ask which one rather than guessing.
 DOCTORS = [
-    ("test.doctor01@example.com", "د. أحمد حسن"),
-    ("test.doctor02@example.com", "د. أحمد محمود"),
-    ("test.doctor03@example.com", "د. منى عبد الرحمن"),
+    ("test.doctor01@example.com", "Ahmed Hassan"),
+    ("test.doctor02@example.com", "Ahmed Mahmoud"),
+    ("test.doctor03@example.com", "Mona Abdelrahman"),
 ]
 
 # Canonical subject names, English. Deliberately not marked [TEST]: a subject is
@@ -65,16 +65,16 @@ DOCTORS = [
 SUBJECTS = ["Anatomy", "Physiology", "Histology", "Biochemistry"]
 
 STUDENTS = [
-    ("test.student01@example.com", "سارة إبراهيم محمد"),
-    ("test.student02@example.com", "عمر خالد فؤاد"),
-    ("test.student03@example.com", "نورهان مصطفى علي"),
-    ("test.student04@example.com", "يوسف حسن الديب"),
-    ("test.student05@example.com", "مريم عادل شاكر"),
-    ("test.student06@example.com", "كريم سمير عبد الله"),
-    ("test.student07@example.com", "هبة الله ناصر"),
-    ("test.student08@example.com", "محمود أنور زكي"),
-    ("test.student09@example.com", "ريم طارق سعيد"),
-    ("test.student10@example.com", "أحمد فتحي الجندي"),
+    ("test.student01@example.com", "Sara Ibrahim Mohamed"),
+    ("test.student02@example.com", "Omar Khaled Fouad"),
+    ("test.student03@example.com", "Nourhan Mostafa Ali"),
+    ("test.student04@example.com", "Youssef Hassan Eldeeb"),
+    ("test.student05@example.com", "Mariam Adel Shaker"),
+    ("test.student06@example.com", "Karim Samir Abdallah"),
+    ("test.student07@example.com", "Hebatallah Nasser"),
+    ("test.student08@example.com", "Mahmoud Anwar Zaki"),
+    ("test.student09@example.com", "Reem Tarek Saeed"),
+    ("test.student10@example.com", "Ahmed Fathy Elgendy"),
 ]
 
 TOPICS = [
@@ -104,11 +104,11 @@ TOPICS = [
 #
 # The shape is built to be searched, so it contains on purpose:
 #   · one subject across two academic years   (Physiology 1 and 2)
-#   · two doctors called أحمد, both on Physiology
-#   · one doctor teaching several courses      (each أحمد teaches two)
+#   · two doctors called Ahmed, both on Physiology
+#   · one doctor teaching several courses      (each Ahmed teaches two)
 #   · courses with several modules, modules with several lectures
 COURSES = [
-    ("anatomy", "Anatomy 1 — تشريح ١", 0, "Anatomy", 1, [
+    ("anatomy", "Anatomy 1", 0, "Anatomy", 1, [
         ("an_general", "General Anatomy", 1, [
             ("a1", "Introduction and Anatomical Terminology", 2700),
         ]),
@@ -123,7 +123,7 @@ COURSES = [
             ("a5", "Bones of the Upper Limb", 3000),
         ]),
     ]),
-    ("histology", "Histology 1 — أنسجة ١", 2, "Histology", 1, [
+    ("histology", "Histology 1", 2, "Histology", 1, [
         ("hi_basic", "Basic Tissues", 1, [
             ("h1", "Introduction to Tissues and Microscopy", 2100),
             ("h2", "Epithelial Tissue", 2700),
@@ -133,7 +133,7 @@ COURSES = [
             ("h4", "Muscle and Nervous Tissue", 2850),
         ]),
     ]),
-    ("physiology", "Physiology 1 — فسيولوجي ١", 0, "Physiology", 1, [
+    ("physiology", "Physiology 1", 0, "Physiology", 1, [
         ("ph_general", "General Physiology", 1, [
             ("p1", "Homeostasis and Body Fluid Compartments", 2400),
             ("p2", "Transport Across the Cell Membrane", 3150),
@@ -154,7 +154,7 @@ COURSES = [
             ("p9", "Tubular Reabsorption and Secretion", 2750),
         ]),
     ]),
-    ("physiology2", "Physiology 2 — فسيولوجي ٢", 1, "Physiology", 2, [
+    ("physiology2", "Physiology 2", 1, "Physiology", 2, [
         ("p2_endo", "Endocrine", 1, [
             ("q1", "The Hypothalamic-Pituitary Axis", 3100),
             ("q2", "Thyroid and Parathyroid Hormones", 2850),
@@ -164,7 +164,7 @@ COURSES = [
             ("q4", "Motor Control and Reflexes", 3050),
         ]),
     ]),
-    ("biochem", "Biochemistry 1 — كيمياء حيوية ١", 1, "Biochemistry", 2, [
+    ("biochem", "Biochemistry 1", 1, "Biochemistry", 2, [
         ("bc_carb", "Carbohydrate Metabolism", 1, [
             ("b1", "Glycolysis", 2950),
             ("b2", "The Citric Acid Cycle", 3200),
@@ -625,10 +625,17 @@ def upsert_lecture(cur, title, doctor_id, course_id, duration, module_id=None):
     row = cur.fetchone()
 
     if row:
-        # File an already-seeded lecture under its module. course_id is left
-        # alone: everything else in the app hangs off it.
+        # File an already-seeded lecture under its module, and keep its doctor in
+        # step with the course. course_id is left alone: everything else in the
+        # app hangs off it.
+        #
+        # doctor_id has to be re-applied, not just set on insert. A later run
+        # that assigns this course to a different doctor moves the course but
+        # would leave the lectures behind, and the catalog search reads a
+        # lecture's doctor from here — see migration 010.
         cur.execute(
-            "UPDATE lectures SET module_id = %s WHERE id = %s", (module_id, row[0])
+            "UPDATE lectures SET module_id = %s, doctor_id = %s WHERE id = %s",
+            (module_id, doctor_id, row[0]),
         )
         return row[0], False
 
