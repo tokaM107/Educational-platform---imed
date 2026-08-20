@@ -44,7 +44,7 @@ DEMO_STEMS = (
 )
 
 DEMO_TOPICS = (
-    "تصنيف العظام",
+    "Bone Classification",
     "العمود الفقري",
     "المفاصل",
     "العضلات الهيكلية",
@@ -170,12 +170,12 @@ def report(found, cur):
           f"{found['seeded_events']}")
     print(f"  questions added to real lectures: {len(found['questions'])}")
 
-    cur.execute("SELECT name FROM users WHERE name = 'د. أحمد سليم'")
+    cur.execute("SELECT name FROM users WHERE name = 'Ahmed Selim'")
 
     if cur.fetchone():
         print()
         print("  NOT REMOVED, but worth knowing: the placeholder doctor 'Test Doctor'")
-        print("  was renamed to «د. أحمد سليم» by the seed, and the course title was")
+        print("  was renamed to «Ahmed Selim» by the seed, and the course title was")
         print("  invented. Reports print both. Set the real ones with:")
         print("    python -m scripts.enroll rename --user-id 1 --name '...'")
         print("    python -m scripts.enroll rename --course-id 1 --title '...'")
