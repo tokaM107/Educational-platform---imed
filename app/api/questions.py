@@ -1,5 +1,6 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from app.api.deps import get_conn
+
+from app.api.deps import get_conn, get_current_user
 from app.schemas.questions import Question, QuestionAttemptCreate
 from app.services import triggers
 
@@ -12,7 +13,10 @@ router = APIRouter(
 def get_questions(
     lecture_id: int,
     conn=Depends(get_conn),
+    current_user=Depends(get_current_user),
 ):
+    """The questions on one lecture. Authenticated: this is course material."""
+
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -51,14 +55,21 @@ def create_attempt(
     attempt: QuestionAttemptCreate,
     background: BackgroundTasks,
     conn=Depends(get_conn),
+    current_user=Depends(get_current_user),
 ):
-    """Record one answer and say whether it was right.
+    """Record one answer, for the authenticated student, and say if it was right.
 
     Answering the last outstanding question on a lecture also earns a report.
     Writing one takes a model call, so it goes to a background task and the
     student gets their result straight away; the report arrives as a
     notification.
+
+    The student is taken from the token. An attempt is a graded record: left to
+    the body, anyone could answer questions as somebody else and move both that
+    student's report and the class statistics their doctor reads.
     """
+
+    student_id = current_user["id"]
 
     with conn.cursor() as cur:
 
@@ -104,7 +115,7 @@ def create_attempt(
                 answered_at
             """,
             (
-                attempt.student_id,
+                student_id,
                 question_id,
                 is_correct,
                 chosen,
@@ -117,7 +128,7 @@ def create_attempt(
 
     # After the response, on its own connection.
     background.add_task(
-        triggers.after_question_attempt, attempt.student_id, lecture_id
+        triggers.after_question_attempt, student_id, lecture_id
     )
 
     return {
