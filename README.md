@@ -11,8 +11,9 @@ never stopped at the flag** — the student can keep watching straight past it.
 
 ```mermaid
 flowchart LR
-    A[lecture video] -->|ffmpeg| B[5-min audio chunks]
-    B -->|ASR| C[transcript.txt]
+    A[lecture video] -->|upload once| Z[(Bunny Stream)]
+    Z -->|smallest rendition,<br/>read by ffmpeg| B[5-min audio chunks]
+    B -->|Arabic ASR| C[transcript.txt]
     C -->|rag.chunking| D[~120-word windows<br/>with timestamps]
     D -->|rag.ingest| E[(Postgres + pgvector)]
     F[student question] --> G[embed query]
@@ -60,8 +61,11 @@ scripts/                operational CLIs
   remove_demo_data.py   take fabricated demo rows back out of a database
 
 rag/                    offline pipelines, not imported by the API
-  transcribe_whisper.py video -> audio chunks -> transcript (HF/fal Whisper)
-  transcribe_cohere.py  same, with a local Cohere Arabic ASR model
+  bunny.py              Bunny Stream: list/upload videos, resolve a readable URL (CLI)
+  audio.py              streams a source into 5-min wav chunks, one at a time
+  transcribe.py         the pipeline: upload -> encode -> audio -> transcript (CLI)
+  transcribe_cohere.py  Arabic ASR over the chunks (local Cohere model)
+  transcribe_whisper.py superseded; kept for reference (writes permanent audio)
   chunking.py           transcript -> timestamped chunks (pure, tested)
   ingest.py             chunk -> embed -> store  (CLI)
   eval_retrieval.py     retrieval / answer smoke test (CLI)
@@ -108,6 +112,9 @@ psql "$DATABASE_URL" -f db/migrations/012_user_password_and_phone.sql
 
 # links public.users to Supabase Auth (run this one against Supabase):
 psql "$DATABASE_URL" -f db/migrations/013_add_auth_user_id.sql
+
+# existing database created before videos moved to Bunny Stream:
+psql "$DATABASE_URL" -f db/migrations/014_lecture_bunny_video.sql
 ```
 
 **Applying 007 locks every video.** Watching needs a subscription to the
@@ -147,22 +154,74 @@ more useful than an invented week.
 
 ## Ingest a lecture
 
+Videos live in a **Bunny Stream** library, not on disk. The pipeline uploads a
+lecture once, remembers its Bunny id, and from then on reads the audio straight
+off the CDN — so re-transcribing needs nothing local, and neither does
+transcribing a lecture somebody else uploaded.
+
 ```bash
-# 1. video -> transcript (writes data/transcripts/transcript.txt)
-python rag/transcribe_cohere.py
+# 1. upload to Bunny (once) and transcribe
+python -m rag.transcribe --lecture-id 1 --video sample1.mp4
+
+# already on Bunny? give the id and nothing is uploaded
+python -m rag.transcribe --lecture-id 1 --bunny-video-id <guid>
+
+# stop after cutting the chunks, without loading the ASR model
+python -m rag.transcribe --lecture-id 1 --video sample1.mp4 --audio-only
+
+# what is in the library, and is it encoded yet?
+python -m rag.bunny list
+python -m rag.bunny list --unfinished
+python -m rag.bunny show <guid>
 
 # 2. transcript -> chunks -> embeddings -> Postgres
 python -m rag.ingest --lecture-id 1 \
     --title "Skeletal System" \
-    --transcript data/transcripts/transcript.txt \
+    --transcript data/transcripts/lecture_1.txt \
     --video sample1.mp4
 
 python -m rag.ingest --dry-run     # chunking only: no API calls, no writes
 ```
 
-Re-running replaces that lecture's chunks instead of duplicating them. The
-video file itself lives in `data/videos/`, and `lectures.video_url` stores its
-file name.
+`.env` needs three values from the Stream library's API tab:
+
+```env
+BUNNY_STREAM_LIBRARY_ID=...
+BUNNY_STREAM_API_KEY=...        # write access to every video — server only
+BUNNY_STREAM_CDN_HOSTNAME=vz-xxxx.b-cdn.net
+```
+
+**Enable MP4 Fallback in the library's encoding tab before uploading anything.**
+Only videos uploaded after it is on get MP4 renditions; without one the pipeline
+falls back to reading the HLS playlist, which works but is slower.
+
+**Nothing is stored.** The video is never downloaded: ffmpeg is given the Bunny
+URL and writes raw PCM to a pipe, which this end cuts into five-minute wavs one
+at a time. Each chunk is transcribed and deleted before the next is written, so
+peak temporary disk is **one chunk — about 9.6 MB** regardless of lecture
+length, and it all lives in a `tempfile.TemporaryDirectory` that goes away on
+success, failure or cancellation alike. Measured on the 74-minute sample: 9.2 MB
+peak, against 274 MB left behind by the previous version.
+
+The pipe is also what paces it. While the ASR is busy nobody is reading, the
+buffer fills and ffmpeg blocks — so it cannot run ahead and pile up chunks.
+
+It asks for the *smallest* rendition on purpose — every rendition carries the
+same soundtrack, so fetching 240p instead of 1080p is the same audio for a
+fraction of the bytes.
+Anything that needs the picture rather than the sound asks for it explicitly:
+`bunny.rendition_url(video, prefer="highest")`, or a specific height, which
+resolves down to what the source actually has since Bunny does not upscale.
+
+`bunny.iter_videos()` pages through the whole library for batch work, and
+`bunny.is_finished(video)` is the guard to run before anything expensive — a
+video still transcoding has no renditions, and skipping the check turns "not
+ready yet" into a 404 from ffmpeg.
+
+Re-running replaces that lecture's chunks instead of duplicating them.
+`lectures.bunny_video_id` holds the Bunny GUID; `lectures.video_url` still names
+the local file a lecture was ingested from, and lectures move to Bunny one at a
+time rather than all at once.
 
 ## Run
 
