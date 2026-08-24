@@ -30,19 +30,27 @@ let lectureId = null;
 const sessionId =
   crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
 
-// There is no login yet, so the app acts as one student throughout: events are
-// recorded against them and the weekly report is theirs. `python -m scripts.enroll
-// list` shows the ids. This is the line that becomes the session user once auth
-// lands — until then it must point at a real, enrolled student.
-const STUDENT_ID = 2;
+// Nothing here says who the student is any more. The server reads that from
+// the token on every request, so the page cannot choose — the old STUDENT_ID
+// constant and its `?as=` override are gone with the endpoints that trusted
+// them. Signed out, this redirects to the login page and stops.
+if (!requireSession()) {
+  throw new Error("not signed in");
+}
 
-// Who this browser is acting as. `?as=1` views the site as another user, which
-// is how you see a doctor's notifications until there is a real login.
-const VIEWER_ID =
-  Number(new URLSearchParams(location.search).get("as")) || STUDENT_ID;
+const me = currentUser();
 
-document.getElementById("report-link").href =
-  `/static/report.html?student_id=${STUDENT_ID}`;
+// No student_id: the report page asks for the caller's own week.
+document.getElementById("report-link").href = "/static/report.html";
+
+// Exam statistics are a teacher's view of their class, and the API now refuses
+// it to students. Hide the link rather than leaving a button that 403s.
+if (me?.role !== "doctor") {
+  document.getElementById("exam-link")?.remove();
+}
+
+document.getElementById("who").textContent = me?.name || "";
+document.getElementById("logout").addEventListener("click", logout);
 
 
 // -------------------------
@@ -103,7 +111,7 @@ function renderInbox(data) {
       // Mark read first: opening the report is a new tab, and the failure mode
       // to avoid is a notification that stays bold after it has been read.
       try {
-        await fetch(`/api/notifications/${id}/read`, { method: "POST" });
+        await api(`/api/notifications/${id}/read`, { method: "POST" });
       } catch (error) {
         console.error("could not mark notification read:", error);
       }
@@ -120,7 +128,7 @@ function renderInbox(data) {
 async function loadNotifications() {
 
   try {
-    const response = await fetch(`/api/notifications?user_id=${VIEWER_ID}&limit=15`);
+    const response = await api("/api/notifications?limit=15");
 
     if (!response.ok) return;
 
@@ -148,7 +156,7 @@ document.addEventListener("click", (event) => {
 
 document.getElementById("read-all").addEventListener("click", async (event) => {
   event.stopPropagation();
-  await fetch(`/api/notifications/read-all?user_id=${VIEWER_ID}`, { method: "POST" });
+  await api("/api/notifications/read-all", { method: "POST" });
   loadNotifications();
 });
 
@@ -178,13 +186,12 @@ async function captureEvent(eventType) {
   if (!lectureId) return;
 
   try {
-    const response = await fetch("/api/events", {
+    const response = await api("/api/events", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        student_id: STUDENT_ID,
         lecture_id: lectureId,
         event_type: eventType,
         video_ts: video.currentTime,
@@ -272,7 +279,7 @@ document.addEventListener("visibilitychange", () => {
 
 async function loadLecture() {
 
-  const response = await fetch("/api/lectures");
+  const response = await api("/api/lectures");
   const lectures = await response.json();
 
   // `?lecture_id=` is how the search assistant links to a lecture. An id that
@@ -291,9 +298,10 @@ async function loadLecture() {
 
   lectureId = lecture.id;
 
-  // The stream is behind the paywall, so say who is watching. This identifies
-  // rather than authenticates — see app/api/subscriptions.py.
-  video.src = `${lecture.video_url}?student_id=${STUDENT_ID}`;
+  // Behind the paywall, and the viewer is now the authenticated user. A <video>
+  // element cannot be given an Authorization header, so videoUrl() puts the
+  // token in the query string — see get_current_user_streaming in deps.py.
+  video.src = videoUrl(lecture.id);
 
   lectureName.textContent =
     `${lecture.title} · ${lecture.chunk_count} مقطع · ${stamp(lecture.duration_ts)}`;
@@ -311,8 +319,8 @@ async function checkAccess(lecture) {
 
   try {
 
-    const response = await fetch(
-      `/api/subscriptions/access?student_id=${STUDENT_ID}&lecture_id=${lecture}`
+    const response = await api(
+      `/api/subscriptions/access?lecture_id=${lecture}`
     );
 
     if (!response.ok) return;
@@ -553,7 +561,7 @@ async function ask(question) {
 
   try {
 
-    const response = await fetch("/api/chat", {
+    const response = await api("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
