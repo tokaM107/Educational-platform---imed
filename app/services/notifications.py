@@ -168,11 +168,24 @@ def inbox(conn, user_id, unread_only=False, limit=30):
 
 
 def mark_read(conn, notification_id=None, user_id=None):
-    """Mark one notification read, or every one this user has."""
+    """Mark one notification read, or every one this user has.
+
+    Passing both marks that one notification only if it belongs to that user —
+    which is how the API calls it, so that a caller cannot reach into somebody
+    else's inbox by guessing a sequential id. `notification_id` on its own is
+    unscoped and is for trusted callers with no request behind them, such as
+    scripts/seed_test_data.py.
+    """
 
     with conn.cursor() as cur:
 
-        if notification_id is not None:
+        if notification_id is not None and user_id is not None:
+            cur.execute(
+                "UPDATE notifications SET read_at = now() "
+                "WHERE id = %s AND user_id = %s AND read_at IS NULL",
+                (notification_id, user_id),
+            )
+        elif notification_id is not None:
             cur.execute(
                 "UPDATE notifications SET read_at = now() "
                 "WHERE id = %s AND read_at IS NULL",
