@@ -8,6 +8,10 @@
  * no doctor filter at all, and only the third layer tells them apart.
  */
 
+if (!requireSession()) {
+  throw new Error("not signed in");
+}
+
 const form = document.getElementById("ask");
 const input = document.getElementById("query");
 const send = document.getElementById("send");
@@ -53,7 +57,7 @@ async function run(query, extraHistory) {
 
   try {
 
-    const response = await fetch("/api/search", {
+    const response = await api("/api/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query, history: extraHistory || [] }),
@@ -280,7 +284,7 @@ clarifyForm.addEventListener("submit", (event) => {
 
 // Sample chips come from search-assistant/cases.py — the same ten rows the
 // grading script runs, so clicking one reproduces exactly what it tests.
-fetch("/api/search/cases")
+api("/api/search/cases")
   .then((response) => response.json())
   .then((cases) => {
 
