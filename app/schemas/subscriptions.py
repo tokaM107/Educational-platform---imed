@@ -6,7 +6,12 @@ from pydantic import BaseModel
 
 
 class SubscribeRequest(BaseModel):
-    student_id: int
+    """Which teacher to subscribe to.
+
+    No `student_id`: a student subscribes themselves, and the request body is
+    not where that is decided.
+    """
+
     doctor_id: int
 
 
