@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>مساعد المحاضرات — Educational AI Platform</title>
   <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/login.css">
 </head>
 <body>
 
@@ -34,8 +35,11 @@
 
       <a class="report-link" id="report-link" href="/static/report.html" target="_blank"
          rel="noopener">📄 التقرير الأسبوعي</a>
-      <a class="report-link" href="/static/exam.html" target="_blank"
+      <a class="report-link" id="exam-link" href="/static/exam.html" target="_blank"
          rel="noopener">📊 نتائج الامتحانات</a>
+
+      <span class="who" id="who"></span>
+      <button type="button" class="logout-button" id="logout">خروج</button>
     </div>
   </header>
 
@@ -94,6 +98,7 @@
 
   </main>
 
+  <script src="/static/auth.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
