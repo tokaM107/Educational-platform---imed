@@ -368,6 +368,22 @@ function render(data) {
   document.title = `نتائج — ${data.lecture_title}`;
 }
 
+// Doctors only: these are class-wide statistics, and the API refuses them to
+// students. Checked here too so a student who follows an old link gets an
+// explanation instead of an empty page full of failed requests.
+if (!requireSession()) {
+  throw new Error("not signed in");
+}
+
+if (currentUser()?.role !== "doctor") {
+  document.getElementById("sheet").innerHTML =
+    '<section class="card"><h2>الصفحة دي للدكاترة</h2>' +
+    '<p class="prose">نتائج الامتحانات بتخص المحاضر بتاع المادة. ' +
+    'ارجع <a href="/">لصفحة المحاضرات</a>.</p></section>';
+  throw new Error("not a doctor");
+}
+
+
 async function load() {
 
   sheet.innerHTML = '<p class="loading">جارِ تحميل النتائج…</p>';
@@ -375,7 +391,7 @@ async function load() {
   try {
 
     const query = new URLSearchParams({ pass_mark: state.passMark });
-    const response = await fetch(`/api/exams/${state.lectureId}?${query}`);
+    const response = await api(`/api/exams/${state.lectureId}?${query}`);
 
     if (!response.ok) throw new Error(await response.text());
 
@@ -393,7 +409,7 @@ async function loadExams() {
   const query = new URLSearchParams();
   if (state.courseId) query.set("course_id", state.courseId);
 
-  const response = await fetch(`/api/exams?${query}`);
+  const response = await api(`/api/exams?${query}`);
   const exams = await response.json();
 
   if (!exams.length) {
