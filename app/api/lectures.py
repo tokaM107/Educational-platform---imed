@@ -9,7 +9,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
-from app.api.deps import get_conn
+from app.api.deps import get_conn, get_current_user, get_current_user_streaming
 from app.config import get_settings
 from app.schemas.lectures import Lecture
 from app.services import subscriptions
@@ -71,7 +71,10 @@ def to_lecture(row):
 
 
 @router.get("", response_model=list[Lecture])
-def list_lectures(conn=Depends(get_conn)):
+def list_lectures(
+    conn=Depends(get_conn),
+    current_user=Depends(get_current_user),
+):
 
     with conn.cursor() as cur:
         cur.execute(LIST_SQL.format(where=""))
@@ -79,7 +82,11 @@ def list_lectures(conn=Depends(get_conn)):
 
 
 @router.get("/{lecture_id}", response_model=Lecture)
-def get_lecture(lecture_id: int, conn=Depends(get_conn)):
+def get_lecture(
+    lecture_id: int,
+    conn=Depends(get_conn),
+    current_user=Depends(get_current_user),
+):
 
     with conn.cursor() as cur:
 
@@ -99,20 +106,24 @@ def get_lecture(lecture_id: int, conn=Depends(get_conn)):
 @router.get("/{lecture_id}/video")
 def stream_video(
     lecture_id: int,
-    student_id: int | None = None,
     conn=Depends(get_conn),
+    current_user=Depends(get_current_user_streaming),
 ):
     """Full video file. FileResponse handles Range requests, so seeking works.
 
-    Behind the paywall: watching needs a subscription to the lecture's teacher.
+    Behind the paywall: watching needs a subscription to the lecture's teacher,
+    and the viewer is now the authenticated user rather than a `student_id` the
+    caller chose. That is the change that turns this from a notice into a lock —
+    the check itself is the one that was always here.
 
-    `student_id` identifies the viewer, it does not authenticate them — anyone
-    can send any id, and until there is a session to read the user from, this
-    stops an honest student without a subscription rather than a dishonest one.
-    The check is here so that swapping the parameter for a session user is the
-    only change needed when auth lands. Set ENFORCE_SUBSCRIPTIONS=false to turn
-    it off in development.
+    Authentication comes from `get_current_user_streaming`, which additionally
+    accepts the token as a query parameter, because a <video> element issues its
+    own request and cannot be given an Authorization header. Set
+    ENFORCE_SUBSCRIPTIONS=false to turn the paywall off in development; the
+    login requirement stays either way.
     """
+
+    student_id = current_user["id"]
 
     if get_settings().enforce_subscriptions:
 
