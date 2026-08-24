@@ -23,7 +23,14 @@ const weekLabel = document.getElementById("week-label");
 
 const params = new URLSearchParams(location.search);
 
+if (!requireSession()) {
+  throw new Error("not signed in");
+}
+
 const state = {
+  // Left null for a student reading their own week — the server fills it in
+  // from the token. It is only ever set for a doctor who picked one of their
+  // students below, and the server checks that they teach them.
   studentId: params.get("student_id"),
   courseId: params.get("course_id"),
   weekStart: params.get("week_start"),
@@ -652,19 +659,24 @@ async function get(extra) {
 
   if (state.reportId) {
 
-    const stored = await fetch(`/api/reports/${state.reportId}`);
+    const stored = await api(`/api/reports/${state.reportId}`);
 
     if (!stored.ok) throw new Error(await stored.text());
 
     return stored.json();
   }
 
-  const query = new URLSearchParams({ student_id: state.studentId, ...extra });
+  const query = new URLSearchParams({ ...extra });
+
+  // Only sent when a doctor has chosen a student. Omitted, the endpoint reports
+  // on whoever is logged in, which is what a student always wants and the only
+  // thing they are allowed.
+  if (state.studentId) query.set("student_id", state.studentId);
 
   if (state.weekStart) query.set("week_start", state.weekStart);
   if (state.courseId) query.set("course_id", state.courseId);
 
-  const response = await fetch(`/api/reports/weekly?${query}`);
+  const response = await api(`/api/reports/weekly?${query}`);
 
   if (!response.ok) throw new Error(await response.text());
 
@@ -722,14 +734,15 @@ async function loadSubjects() {
      A student arriving from the player's button already carries their own id in
      the URL, and for them the picker is noise — worse, it is a list of their
      classmates. So it only appears when there is genuinely a choice to make,
-     which is the doctor's case. There is no session to read the current user
-     from yet, so the alternative to asking would be guessing. */
+     which is the doctor's case. The endpoint now returns only what the caller
+     may open — a student's own enrolments, or a doctor's own students — so the
+     list can no longer contain a classmate to begin with. */
 
   const field = subjectPicker.closest(".field");
 
   try {
 
-    const response = await fetch("/api/reports/subjects");
+    const response = await api("/api/reports/subjects");
     const subjects = await response.json();
 
     if (!subjects.length) {
@@ -747,7 +760,8 @@ async function loadSubjects() {
       state.courseId = String(subjects[0].course_id);
     }
 
-    subjectPicker.value = `${state.studentId}:${state.courseId || subjects[0].course_id}`;
+    subjectPicker.value =
+      `${state.studentId || subjects[0].student_id}:${state.courseId || subjects[0].course_id}`;
 
     if (field) field.hidden = subjects.length < 2;
 
