@@ -11,5 +11,12 @@ class Question(BaseModel):
 
 
 class QuestionAttemptCreate(BaseModel):
-    student_id: int
+    """An answer to one question.
+
+    No `student_id`: the attempt is recorded against whoever is authenticated.
+    Attempts are what the exam statistics and the "what did they get wrong"
+    half of the report are built from, so a body naming its own student could
+    write answers — right or wrong — into another student's record.
+    """
+
     selected_option: str
