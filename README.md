@@ -28,7 +28,10 @@ flowchart LR
 ```
 app/                    FastAPI service
   config.py             every tunable value, read once from .env
-  db.py                 pgvector-aware connection pool
+  db/
+    __init__.py         pgvector-aware connection pool (what the app uses)
+    _generated_models.py  reflected from the schema — DO NOT EDIT, `make db-gen`
+    models.py           the hand-written half: re-exports, the vector helper
   api/                  HTTP layer only (auth, lectures, chat)
     deps.py             get_current_user, require_student/require_doctor, get_conn
   schemas/              pydantic request/response models
@@ -70,7 +73,10 @@ rag/                    offline pipelines, not imported by the API
   ingest.py             chunk -> embed -> store  (CLI)
   eval_retrieval.py     retrieval / answer smoke test (CLI)
 
-db/schema.sql           tables, including transcript_chunks(embedding vector)
+db/                     FROZEN. schema.sql and migrations/001-014 are history
+                        now, kept for the reasoning written into them. Nothing
+                        applies them. See db/README.md.
+scripts/gen_models.py   reflects a database into _generated_models.py
 data/                   videos, audio chunks, transcripts
 tests/                  pure-logic tests: chunking, segments, engagement
 ```
@@ -79,6 +85,38 @@ tests/                  pure-logic tests: chunking, segments, engagement
 pipeline and the live API can never disagree about the embedding model, its
 dimension, or the chunking parameters.
 
+## Schema
+
+**The schema is not in this repository.** It lives in
+[educational-platform-db](https://github.com/tokaM107/educational-platform-db),
+because the Supabase project behind it is shared with the NestJS API and a
+schema owned by one of its two consumers is a schema that drifts. Who owns
+which table, and how to change one without breaking the other service, is in
+that repository's `SCHEMA.md`.
+
+`db/schema.sql` and `db/migrations/*.sql` here are frozen. They record how the
+database got to where it is and are worth reading for that; they are not
+applied to anything.
+
+`app/db/_generated_models.py` is a drift canary. It is SQLAlchemy models
+reflected from the database by `scripts/gen_models.py`, and **nothing imports
+it at runtime** — the API and the ingest pipeline talk to Postgres through the
+psycopg pool and hand-written SQL, as they always have. Its only job is to
+change when the schema changes:
+
+```bash
+make db-gen        # regenerate
+make db-gen-check  # regenerate and fail if it differs from what is committed
+```
+
+CI runs `db-gen-check` against a database built from the migrations. A red
+build means the schema moved and this file did not, or somebody edited it by
+hand. Either way the fix is `make db-gen` and commit.
+
+Hand-written additions go in `app/db/models.py`, never in the generated file.
+API request and response shapes stay in `app/schemas/` and are not derived from
+either — a column can change without the HTTP contract following it around.
+
 ## Setup
 
 ```bash
@@ -86,38 +124,20 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 docker compose up -d                       # Postgres 16 + pgvector
-psql "$DATABASE_URL" -f db/schema.sql       # first run only
 
-# existing database created before the vector index / query cache:
-psql "$DATABASE_URL" -f db/migrations/001_vector_index_and_query_cache.sql
-
-# existing database created before the engagement event types:
-psql "$DATABASE_URL" -f db/migrations/002_engagement_events.sql
-
-# existing database created before courses / enrolments:
-psql "$DATABASE_URL" -f db/migrations/003_courses_and_enrollments.sql
-
-# existing database created before stored report narratives:
-psql "$DATABASE_URL" -f db/migrations/004_report_narratives.sql
-
-# existing database created before event-triggered reports / notifications:
-psql "$DATABASE_URL" -f db/migrations/005_event_reports_and_notifications.sql
-
-# existing database created before distractor analysis / subscriptions:
-psql "$DATABASE_URL" -f db/migrations/006_attempt_selected_option.sql
-psql "$DATABASE_URL" -f db/migrations/007_subscriptions.sql
-
-# existing database created before login credentials:
-psql "$DATABASE_URL" -f db/migrations/012_user_password_and_phone.sql
-
-# links public.users to Supabase Auth (run this one against Supabase):
-psql "$DATABASE_URL" -f db/migrations/013_add_auth_user_id.sql
-
-# existing database created before videos moved to Bunny Stream:
-psql "$DATABASE_URL" -f db/migrations/014_lecture_bunny_video.sql
+# The schema is not in this repository any more. Build the database from the
+# migrations, which live in educational-platform-db, checked out alongside:
+cd ../educational-platform-db && supabase db reset
 ```
 
-**Applying 007 locks every video.** Watching needs a subscription to the
+The local compose image is `pgvector/pgvector:pg16`; Supabase runs Postgres 17,
+and CI builds against `pg17` to match it. Changing the tag in
+`docker-compose.yml` will not work against an existing volume — Postgres
+refuses to start on a data directory from another major version. Recreate it
+deliberately (`docker compose down -v`) or leave it; nothing in this project
+depends on the difference today.
+
+**A fresh database locks every video.** Watching needs a subscription to the
 lecture's teacher, so existing students need one granting before they can play
 anything:
 
