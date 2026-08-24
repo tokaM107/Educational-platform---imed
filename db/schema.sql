@@ -137,6 +137,12 @@ CREATE TABLE lectures (
     module_id INTEGER REFERENCES modules(id) ON DELETE SET NULL,
     title VARCHAR(255) NOT NULL,
     video_url TEXT,
+
+    -- Bunny Stream's GUID for this lecture, once it has been uploaded there.
+    -- Kept alongside video_url rather than replacing it: one says which file the
+    -- transcript was ingested from, the other says what a student plays, and
+    -- lectures move to Bunny one at a time rather than all at once.
+    bunny_video_id TEXT UNIQUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT lectures_course_doctor_fkey
         FOREIGN KEY (course_id, doctor_id) REFERENCES courses (id, doctor_id)
