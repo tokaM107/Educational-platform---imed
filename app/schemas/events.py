@@ -25,7 +25,14 @@ EventType = Literal[
 
 
 class Event(BaseModel):
-    student_id: int
+    """What the player sends.
+
+    No `student_id`: the event is recorded against whoever the request is
+    authenticated as. A player that could name the student would let anyone post
+    watch time onto anyone's record, which is the one thing the weekly report and
+    the engagement figures take entirely on trust.
+    """
+
     lecture_id: int
     event_type: EventType
     video_ts: float
@@ -34,6 +41,11 @@ class Event(BaseModel):
 
 class EventResponse(Event):
     id: int
+
+    # On the way out, not on the way in: the server says who it recorded this
+    # for, having decided that from the token.
+    student_id: int
+
     created_at: datetime
 
 
