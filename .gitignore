@@ -225,3 +225,9 @@ __marimo__/
 # Local media / dataset files
 data/audios/
 data/videos/
+# Database dumps from the move to Supabase. Full copies of the users table —
+# names, emails — so they stay out of the repository. Kept on disk as the
+# rollback for that migration; delete them once Supabase is settled.
+local_backup.sql
+supabase_restore.sql
+*.dump
