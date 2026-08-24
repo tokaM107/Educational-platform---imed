@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends
 
-from app.api.deps import get_conn, get_tutor
+from app.api.deps import get_conn, get_current_user, get_tutor
 from app.schemas.chat import ChatRequest, ChatResponse, Citation, VideoSegment
 from app.services.prompts import to_stamp
 
@@ -14,8 +14,18 @@ router = APIRouter(
 
 
 @router.post("/chat", response_model=ChatResponse)
-def chat(data: ChatRequest, conn=Depends(get_conn), tutor=Depends(get_tutor)):
-    """Answer a question from the lecture transcript and point at the video."""
+def chat(
+    data: ChatRequest,
+    conn=Depends(get_conn),
+    tutor=Depends(get_tutor),
+    current_user=Depends(get_current_user),
+):
+    """Answer a question from the lecture transcript and point at the video.
+
+    Authenticated: this is the paid tutor, and every call spends a model
+    request. Left open it is both a way to read course material without an
+    account and a way to run up the bill from outside.
+    """
 
     result = tutor.ask(
         conn,
