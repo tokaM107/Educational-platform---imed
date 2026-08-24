@@ -1,0 +1,99 @@
+# CI job A — "the models match the migrations".
+#
+# Builds a database out of the migration files, reflects it into SQLAlchemy
+# models, and fails if the result is not byte-for-byte what is committed at
+# app/db/_generated_models.py.
+#
+# A red build here means one of two things happened: someone changed the
+# database and did not regenerate, or someone edited the generated file by
+# hand. Both are fixed the same way — run `make db-gen` and commit the result.
+#
+# This says nothing about whether the live Supabase database agrees with the
+# migrations. That is CI job B, and it lives in the migrations repository.
+
+name: models vs migrations
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  generated-models-are-current:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Must match the major version Supabase runs, and must carry pgvector:
+        # transcript_chunks.embedding does not reflect without it.
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the migrations
+        uses: actions/checkout@v4
+        with:
+          # The schema's home. See SCHEMA.md in that repository.
+          repository: tokaM107/educational-platform-db
+          path: .db-repo
+          # Only needed while that repository is private. A read-only
+          # fine-grained PAT with Contents: read is enough.
+          token: ${{ secrets.DB_REPO_TOKEN }}
+
+      - name: Build the database from the migrations
+        run: |
+          set -euo pipefail
+
+          # Supabase installs extensions into an `extensions` schema that a
+          # stock Postgres image does not have. Without this the baseline's
+          # `CREATE EXTENSION ... WITH SCHEMA extensions` fails on line one.
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f .db-repo/supabase/ci/00_bootstrap.sql
+
+          # Filename order is the apply order. Supabase names migrations with a
+          # UTC timestamp prefix, so lexicographic and chronological agree.
+          for file in .db-repo/supabase/migrations/*.sql; do
+            echo "--> $file"
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$file"
+          done
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the generator
+        # Not the whole of requirements.txt: torch and friends are irrelevant
+        # here and take minutes to fetch. These are what reflection needs.
+        run: |
+          pip install \
+            "sqlacodegen==4.0.4" \
+            "SQLAlchemy==2.0.52" \
+            "pgvector==0.5.0" \
+            "psycopg[binary]==3.3.4"
+
+      - name: Regenerate
+        run: python scripts/gen_models.py "$DATABASE_URL" --outfile app/db/_generated_models.py
+
+      - name: Fail if the committed models are stale
+        run: |
+          if ! git diff --exit-code app/db/_generated_models.py; then
+            echo
+            echo "app/db/_generated_models.py does not match the migrations."
+            echo "Run 'make db-gen' against a database built from"
+            echo "supabase/migrations, and commit the result."
+            exit 1
+          fi
