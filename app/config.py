@@ -108,6 +108,16 @@ class Settings:
         # own configuration is read in app/services/supabase_client.py, and
         # token lifetime is now a project setting in the Supabase dashboard.
 
+        # --- Bunny Stream ---
+        #
+        # Where the lecture videos live. The library id and key come from the
+        # Stream library's API tab; the hostname is its pull zone, and is the
+        # only one of the three that is safe in a browser — the key has write
+        # access to every video in the library.
+        self.bunny_library_id = env("BUNNY_STREAM_LIBRARY_ID", "")
+        self.bunny_api_key = env("BUNNY_STREAM_API_KEY", "")
+        self.bunny_cdn_hostname = env("BUNNY_STREAM_CDN_HOSTNAME", "")
+
         # --- Paths ---
         self.base_dir = BASE_DIR
         self.data_dir = BASE_DIR / "data"
@@ -128,6 +138,33 @@ class Settings:
             raise RuntimeError("GEMINI_API_KEY is not set (see .env)")
 
         return self.gemini_api_key
+
+    def require_bunny(self):
+        """(library_id, api_key, cdn_hostname), or a refusal naming what is missing.
+
+        All three together, because a pipeline that uploads with two of them and
+        then cannot work out where to read the result from has already spent the
+        upload by the time it finds out.
+        """
+
+        missing = [
+            name
+            for name, value in (
+                ("BUNNY_STREAM_LIBRARY_ID", self.bunny_library_id),
+                ("BUNNY_STREAM_API_KEY", self.bunny_api_key),
+                ("BUNNY_STREAM_CDN_HOSTNAME", self.bunny_cdn_hostname),
+            )
+            if not value
+        ]
+
+        if missing:
+            raise RuntimeError(f"{', '.join(missing)} not set (see .env)")
+
+        return (
+            self.bunny_library_id,
+            self.bunny_api_key,
+            self.bunny_cdn_hostname.strip().rstrip("/"),
+        )
 
 
 @lru_cache
