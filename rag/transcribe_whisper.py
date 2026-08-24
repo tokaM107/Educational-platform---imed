@@ -1,3 +1,22 @@
+"""SUPERSEDED — kept for reference only. Do not run this on a real lecture.
+
+Use `python -m rag.transcribe` instead.
+
+This is the original script, from before the videos moved to Bunny Stream. It
+reads one hardcoded file out of data/videos/, writes the entire lecture out as
+a wav under data/audios/, then cuts every chunk of it before transcribing any —
+for the sample lecture that is 143 MB of audio plus another 137 MB of chunks,
+none of it deleted afterwards. It is exactly the behaviour rag/audio.py's
+streaming path exists to replace.
+
+It is also still wrong in a smaller way: the block after the transcription loop
+writes the last chunk's text a second time, and would raise NameError on a
+lecture with no chunks at all.
+
+Left in the tree because it documents the HF/fal Whisper call, which nothing
+else does. Nothing imports it.
+"""
+
 import os
 import subprocess
 from pathlib import Path
