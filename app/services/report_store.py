@@ -133,3 +133,22 @@ def for_student(conn, student_id, limit=20):
             }
             for row in cur.fetchall()
         ]
+
+
+def owner(conn, report_id):
+    """(student_id, course_id) for a stored report, or None if there is no such
+    report.
+
+    Read before the report itself: deciding whether the caller may see it needs
+    to happen before the payload is assembled, and the payload does not carry
+    the student id at its top level to check against.
+    """
+
+    with conn.cursor() as cur:
+
+        cur.execute(
+            "SELECT student_id, course_id FROM reports WHERE id = %s",
+            (report_id,),
+        )
+
+        return cur.fetchone()
