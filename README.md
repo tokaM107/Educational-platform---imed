@@ -29,8 +29,12 @@ app/                    FastAPI service
   config.py             every tunable value, read once from .env
   db.py                 pgvector-aware connection pool
   api/                  HTTP layer only (auth, lectures, chat)
+    deps.py             get_current_user, require_student/require_doctor, get_conn
   schemas/              pydantic request/response models
   services/
+    supabase_client.py  the publishable client, and the secret-key admin one
+    security.py         verifying a Supabase access token (no hashing, no minting)
+    authz.py            who may read whose data (ownership, not just role)
     embeddings.py       Gemini embeddings (batching, quota throttling)
     query_cache.py      question embeddings cached in Postgres
     engagement.py       video_events -> watch time + coverage (pure, tested)
@@ -46,6 +50,8 @@ app/                    FastAPI service
     llm.py              generation with retry and a fallback model
     tutor.py            the RAG orchestration
   static/               demo UI (chat + player with segment flag)
+    login.html/.js/.css   the login screen
+    auth.js               session storage + the authenticated API client
     report.html/.js/.css  the weekly report, printed to PDF by the browser
 
 scripts/                operational CLIs
@@ -96,6 +102,12 @@ psql "$DATABASE_URL" -f db/migrations/005_event_reports_and_notifications.sql
 # existing database created before distractor analysis / subscriptions:
 psql "$DATABASE_URL" -f db/migrations/006_attempt_selected_option.sql
 psql "$DATABASE_URL" -f db/migrations/007_subscriptions.sql
+
+# existing database created before login credentials:
+psql "$DATABASE_URL" -f db/migrations/012_user_password_and_phone.sql
+
+# links public.users to Supabase Auth (run this one against Supabase):
+psql "$DATABASE_URL" -f db/migrations/013_add_auth_user_id.sql
 ```
 
 **Applying 007 locks every video.** Watching needs a subscription to the
@@ -161,26 +173,38 @@ uvicorn app.main:app --reload
 - `http://localhost:8000/` — demo UI
 - `http://localhost:8000/docs` — OpenAPI
 
+All endpoints below require `Authorization: Bearer <supabase access token>`;
+only `/health` and the login route are public.
+
 | Endpoint | Purpose |
 | --- | --- |
+| `POST /api/auth/login` | email + password → Supabase session (public) |
+| `POST /api/auth/refresh` | refresh token → a new access token |
+| `POST /api/auth/logout` | revoke the session server-side |
+| `POST /api/auth/password/forgot` | email a six-digit recovery code (public) |
+| `POST /api/auth/password/reset` | check the code, set a new password (public) |
+| `GET /api/auth/me` | the application user behind the token |
 | `POST /api/chat` | question → grounded answer + video segments + citations |
 | `GET /api/lectures` | lectures with chunk count and duration |
 | `GET /api/lectures/{id}/video` | the whole video, with byte-range support so seeking works |
 | `POST /api/events` | record one video event (insert only, deliberately trivial) |
 | `GET /api/events/analytics` | watch time / time away / session length for a session |
 | `GET /api/reports/weekly` | a student's week on a course, with a generated narrative |
-| `GET /api/reports/subjects` | every student/course a report can be built for |
+| `GET /api/reports/subjects` | student/course pairs **the caller** may open a report for |
 | `GET /api/reports/{id}` | a report a completion produced, as it was issued |
-| `GET /api/exams` | lectures that have questions, for the instructor picker |
-| `GET /api/exams/{lecture_id}` | post-exam statistics for one lecture |
-| `POST /api/subscriptions` | give a student paid access to a teacher |
-| `GET /api/subscriptions/access` | may this student watch this lecture? |
-| `GET /api/notifications` | one user's inbox, with the unread count |
+| `GET /api/exams` | the caller's own lectures that have questions (doctors) |
+| `GET /api/exams/{lecture_id}` | post-exam statistics for one lecture (its doctor only) |
+| `POST /api/subscriptions` | subscribe the authenticated student to a teacher |
+| `GET /api/subscriptions/access` | may the caller watch this lecture? |
+| `GET /api/notifications` | the caller's inbox, with the unread count |
 | `POST /api/notifications/{id}/read` | mark one read |
-| `POST /api/auth/login` | stub, unchanged |
 
 ```bash
-curl -s localhost:8000/api/chat -H 'Content-Type: application/json' \
+TOKEN=$(curl -s localhost:8000/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"you@example.com","password":"…"}' | python -c 'import json,sys;print(json.load(sys.stdin)["access_token"])')
+
+curl -s localhost:8000/api/chat \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
   -d '{"message":"عظمة القعبرة اسمها ايه بالانجليزي وليه؟","lecture_id":1}'
 ```
 
@@ -287,8 +311,9 @@ sequential scan until it grows.
 
 **The weekly report** (`app/services/report.py`, `/static/report.html`) — one
 student, one course, seven days, assembled from rows that already exist. Open
-it from the 📄 button in the player, or at
-`/static/report.html?student_id=<id>`.
+it from the 📄 button in the player, or at `/static/report.html` — it reports on
+whoever is logged in. A doctor can add `?student_id=<id>`, and the server checks
+they teach that student before answering.
 
 The page reads as prose with the figures set into it, not as a grid of numbers:
 "شفت 45% من مادة الأسبوع" says something a tile reading `45.1` does not. The
@@ -362,6 +387,98 @@ picture as a complete one.
 without marking which option was right. It is an instructor endpoint and needs
 authentication before launch; today nothing stops a student calling it.
 
+## Authentication
+
+Supabase Auth owns credentials — password hashing, sign-in, token issuance and
+expiry, refresh rotation, email verification and recovery. Nothing in this
+repository hashes, compares or signs anything; a second implementation of that
+would be one too many.
+
+What stays here is identity mapping and authorization:
+
+```
+Supabase auth.users.id  (UUID, owns the password)
+        |
+        |  users.auth_user_id
+        v
+public.users.id         (INTEGER, what every domain table keys on)
+```
+
+The integer id is unchanged and all eleven foreign keys still point at it. The
+UUID identifies the login; the integer identifies the person the rest of the
+schema knows about.
+
+A request arrives with `Authorization: Bearer <token>`. `decode_access_token`
+(`app/services/security.py`) verifies it against the project's ES256 public
+keys, fetched once from the JWKS endpoint and cached — so verification is local
+and costs no round trip. `get_current_user` (`app/api/deps.py`) then maps the
+token's `sub` onto a `public.users` row and returns it. Missing, invalid,
+expired, or valid-but-unlinked all come back **401**; a user who is who they say
+and still may not have the thing gets **403**.
+
+**The application role is read from the database, never from the token.**
+Supabase puts a `role` claim in the JWT and it says `authenticated`, meaning a
+Postgres role. Reading that as the student/doctor role would flatten every user
+into the same permissions.
+
+**FastAPI owns the session.** The browser talks only to this API and never to
+Supabase directly, so a session is created in one place and ended in one place.
+The page keeps the tokens and `app/static/auth.js` attaches, refreshes and
+discards them; every protected request in the UI goes through its `api()`
+helper, so no page carries token logic of its own.
+
+One exception, and it is deliberate: a `<video>` element fetches its own source
+and cannot be given a header, so `/api/lectures/{id}/video` also accepts the
+token as a query parameter. Same token, same verification — only the transport
+differs, and only on that route.
+
+### Password recovery
+
+"نسيت كلمة المرور؟" on the login page runs a two-step flow, both steps public
+because being unable to log in is the whole premise:
+
+```
+POST /api/auth/password/forgot   {email}                       -> code by email
+POST /api/auth/password/reset    {email, code, new_password}   -> password set
+```
+
+Supabase generates the code, mails it, decides how long it lives and verifies
+it. **Nothing here stores a code** — there is no reset-codes table and there
+should not be one: a second store of a second secret is a second thing to leak.
+
+**This needs one change in the Supabase dashboard.** Authentication → Emails →
+*Reset Password* must render `{{ .Token }}`. Left on the default
+`{{ .ConfirmationURL }}` it mails a link instead of a code, and the code box on
+the login page has nothing to type into it.
+
+Two things the flow is careful about. It answers identically whether or not the
+address is registered, so it cannot be used to find out who has an account — on
+a platform whose users are all students at one school, that is worth
+protecting. And the new password is set through the admin API rather than
+through the session the code produces, so the recovery session is never handed
+back as a way in; every other session for that user is signed out at the same
+time, since whoever forced the reset may be signed in as them right now.
+
+### Rate limits
+
+`app/services/rate_limit.py`, applied to sign-in and to both recovery steps.
+
+It exists because of where the session is owned. Every login and every code
+reaches Supabase *from this server*, so Supabase's per-IP limits see the entire
+user base as one client — they cannot tell an attacker from everybody else, and
+tripping them would lock out everybody at once. The only place callers are still
+distinguishable is here.
+
+The limiter is in-process, so the budget is per worker and a restart forgets it.
+That is enough to slow password guessing and to stop the reset form being used
+to send mail; it is not enough on its own at scale, where this belongs in Redis
+or at the proxy.
+
+Authorization lives in `app/services/authz.py`, because a role is rarely the
+whole answer. Being a doctor is not permission to read every student on the
+platform; teaching them is. `may_view_student` admits exactly two cases — it is
+your own data, or you are the doctor teaching them.
+
 ## Paid access
 
 A subscription is per **teacher** and unlocks everything they publish. It is
@@ -380,11 +497,10 @@ python -m scripts.enroll subscribe   --student-id 2 --doctor-id 1
 python -m scripts.enroll unsubscribe --student-id 2 --doctor-id 1
 ```
 
-**This is a paywall, not a security boundary.** The check identifies the viewer
-from a request parameter, and anyone can send any id — as is true of the whole
-API today. The check lives in the right place, so swapping the parameter for a
-session user is the only change needed when auth lands. `ENFORCE_SUBSCRIPTIONS=false`
-turns it off in development.
+**This is a real boundary now.** The viewer is the authenticated user, read
+from a verified Supabase token, so it can no longer be walked past by sending
+somebody else's id. `ENFORCE_SUBSCRIPTIONS=false` turns it off in development;
+authentication itself stays on either way.
 
 Two things `subscriptions` deliberately does not record, both of which need a
 column the day the product needs them: **when access ends** (no `expires_at`, so
@@ -450,10 +566,17 @@ retrieved video segment with a notice instead of an error.
 ## Tests
 
 ```bash
-pytest tests -q                    # pure logic, no database or API key
+pytest tests -q                    # pure logic + auth, no database or network
 python -m rag.eval_retrieval       # retrieval against the real database
 python -m rag.eval_retrieval --with-answer
 ```
+
+`tests/test_auth.py` and `tests/test_security.py` cover authentication and
+authorization without touching Supabase or Postgres: token verification is
+stubbed at the one seam that matters, and `tests/fake_db.py` stands in for the
+connection so a test can assert on the queries that were actually run — which
+is how "the id came from the token, not the request body" is checked rather
+than assumed.
 
 ## Notes and limits
 
@@ -463,5 +586,12 @@ python -m rag.eval_retrieval --with-answer
 - The Gemini free tier counts every embedded text (not every HTTP call) toward
   100 requests/minute, so ingesting 126 chunks takes ~2 minutes. `Embedder`
   paces itself and retries on 429.
-- Auth is still the original stub; the chat endpoint does not yet check who is
-  asking.
+- Subscribing is self-service and free: `POST /api/subscriptions` grants a
+  logged-in student access to a teacher without any payment step. It records an
+  entitlement a payment is supposed to have produced, and nothing yet checks
+  that one did. This is the next real gap.
+- Sign-up is not exposed. Accounts are created in Supabase and linked to a
+  `public.users` row by hand; a token with no linked row is refused. Password
+  *recovery* is wired; account *creation* is not.
+- `password_hash`, `phone` and `phone_verified_at` on `users` are dead columns
+  from the short-lived attempt to own logins here. Nothing reads them.
