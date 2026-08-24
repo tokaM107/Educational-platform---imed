@@ -2,14 +2,57 @@
 -- Requires a Postgres image that includes pgvector, e.g. pgvector/pgvector:pg16
 -- CREATE EXTENSION IF NOT EXISTS vector;
 
--- People: students and doctors
+-- People: students and doctors.
+--
+-- The application's own key is `id`, an integer, and every domain foreign key
+-- in this file points at it. Credentials are not here at all: Supabase Auth
+-- owns them, and `auth_user_id` below is the link to the row that does.
+--
+-- `password_hash`, `phone` and `phone_verified_at` are left over from a
+-- short-lived attempt to own logins here. Nothing reads them any more —
+-- hashing, verification, recovery and phone confirmation are all Supabase's
+-- now. They are kept for the moment rather than dropped, because dropping a
+-- column is not reversible and nothing is gained by hurrying; see the notes in
+-- db/migrations/012.
 CREATE TABLE users (
     id SERIAL PRIMARY KEY,
     role VARCHAR(20) NOT NULL CHECK (role IN ('student', 'doctor')),
     name VARCHAR(255) NOT NULL,
     email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash TEXT,
+    phone VARCHAR(20) CONSTRAINT users_phone_e164
+        CHECK (phone ~ '^\+[1-9][0-9]{7,14}$'),
+    -- Ownership of the number, not merely its presence. An unverified phone is
+    -- a string the user typed; sending a reset code to it trusts a claim nobody
+    -- ever checked.
+    phone_verified_at TIMESTAMPTZ,
+
+    -- The link to Supabase Auth, which owns credentials. `id` above stays the
+    -- application's key and every domain foreign key still points at it: the
+    -- UUID identifies the login, the integer identifies the person the rest of
+    -- this schema knows about. Nullable because a row can exist before anyone
+    -- has been given a way to sign in to it.
+    auth_user_id UUID UNIQUE,
+
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- The foreign key onto auth.users only exists on Supabase; a plain Postgres
+-- database has no auth schema and does not need one. Added conditionally so
+-- this file loads on both.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth')
+       AND NOT EXISTS (
+           SELECT 1 FROM pg_constraint WHERE conname = 'users_auth_user_id_fkey'
+       )
+    THEN
+        ALTER TABLE public.users
+            ADD CONSTRAINT users_auth_user_id_fkey
+            FOREIGN KEY (auth_user_id) REFERENCES auth.users(id)
+            ON DELETE SET NULL;
+    END IF;
+END $$;
 
 -- Subject tags, e.g. "Cardiology basics"
 CREATE TABLE topics (
@@ -245,6 +288,11 @@ CREATE TABLE subscriptions (
     subscribed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (student_id, doctor_id)
 );
+
+-- One account per phone number, and the lookup the reset flow does ("who owns
+-- this number?"). Postgres treats NULLs as distinct in a unique index, so every
+-- user who has not given a number is unaffected by the constraint.
+CREATE UNIQUE INDEX idx_users_phone ON users (phone);
 
 -- Indexes for the lookups you'll run most (by student, by lecture)
 CREATE INDEX idx_video_events_student ON video_events(student_id);
