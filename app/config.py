@@ -17,6 +17,21 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 
+def env(name, default):
+    """os.getenv, except that a variable set to nothing counts as unset.
+
+    `KEY=` in a .env file is not the same as leaving KEY out: os.getenv finds
+    the key, returns "", and the default never applies. For a string that is
+    merely wrong (an empty algorithm name); for an int it is fatal, because
+    int("") raises and the exception surfaces at import time as a stack trace
+    from whichever module happened to touch Settings first.
+    """
+
+    value = os.getenv(name, "").strip()
+
+    return value if value else default
+
+
 class Settings:
 
     def __init__(self):
@@ -59,10 +74,13 @@ class Settings:
 
         # --- Access ---
 
-        # Whether a lecture video requires a subscription to its teacher. The
-        # check identifies the student from a request parameter, which is not
-        # authentication — anyone can send any id — so this is a paywall, not a
-        # security boundary, until there is a session to read the user from.
+        # Whether a lecture video requires a subscription to its teacher.
+        #
+        # This is now a real boundary. The student it checks comes from the
+        # verified token rather than from a request parameter, so it can no
+        # longer be walked past by sending somebody else's id. Turning it off
+        # unlocks every video for every logged-in user, which is a development
+        # convenience and not something to leave off in production.
         self.enforce_subscriptions = (
             os.getenv("ENFORCE_SUBSCRIPTIONS", "true").strip().lower()
             not in ("0", "false", "no", "off")
@@ -80,6 +98,15 @@ class Settings:
         # --- Chunking (offline pipeline) ---
         self.chunk_words = int(os.getenv("CHUNK_WORDS", "120"))
         self.overlap_words = int(os.getenv("OVERLAP_WORDS", "25"))
+
+        # --- Auth ---
+        #
+        # Nothing to configure here. Supabase issues and signs the tokens, and
+        # the settings that used to live here (JWT_SECRET, JWT_ALGORITHM,
+        # ACCESS_TOKEN_MINUTES) belonged to an application that minted its own —
+        # keeping them would suggest they still controlled something. Supabase's
+        # own configuration is read in app/services/supabase_client.py, and
+        # token lifetime is now a project setting in the Supabase dashboard.
 
         # --- Paths ---
         self.base_dir = BASE_DIR
