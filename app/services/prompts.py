@@ -14,6 +14,11 @@ Anti-hallucination has three layers:
 from pydantic import BaseModel, Field
 
 
+ANSWER_PROMPT_VERSION = "lecture-answer-v2"
+REWRITE_PROMPT_VERSION = "followup-rewrite-v1"
+SUMMARY_PROMPT_VERSION = "conversation-summary-v1"
+
+
 class TutorReply(BaseModel):
     """What the model must return. Enforced as a response schema."""
 
@@ -25,6 +30,16 @@ class TutorReply(BaseModel):
         default_factory=list,
         description="numbers of the excerpts the answer was built from",
     )
+
+
+class StandaloneQueryReply(BaseModel):
+    standalone_query: str = Field(
+        description="The retrieval question only, in the student's language"
+    )
+
+
+class ConversationSummaryReply(BaseModel):
+    summary: str = Field(description="Bounded conversational state, not evidence")
 
 
 SYSTEM_INSTRUCTION = """\
@@ -53,6 +68,21 @@ SYSTEM_INSTRUCTION = """\
 - answer: الإجابة المبسطة (أو جملة الاعتذار لو found = false).
 - used_excerpts: أرقام المقاطع اللي بنيت عليها الإجابة فعلاً — مش كل المقاطع \
 اللي اتعرضت عليك، بس اللي استخدمتها.
+"""
+
+REWRITE_SYSTEM_INSTRUCTION = """\
+You rewrite the student's latest message into a standalone transcript-search query.
+Resolve references such as it, that point, why, the previous type, وده، وليه from
+the supplied conversation state. Preserve the student's language where practical.
+Do not answer, explain, or introduce medical facts. If the question is already
+standalone, return it unchanged. Return only the structured standalone_query.
+"""
+
+SUMMARY_SYSTEM_INSTRUCTION = """\
+Summarize conversation state for resolving later follow-ups. Preserve only topics,
+pronoun referents, student confusion, distinctions already discussed, and unresolved
+questions. Do not add medical facts, do not copy full answers, and never describe
+the summary as evidence. Return only the structured summary.
 """
 
 NOT_IN_LECTURE = (
@@ -99,6 +129,43 @@ def build_user_prompt(question, passages):
         f"سؤال الطالب: {question}\n\n"
         "جاوب من المقاطع اللي فوق بس، وبسّط شرح الدكتور، "
         "واذكر أمثلته وطرق التذكر بتاعته."
+    )
+
+
+def build_rewrite_prompt(question, history, summary=""):
+    history_text = "\n".join(
+        f"{role}: {content}" for role, content in history
+    ) or "(none)"
+    return (
+        f"Previous bounded summary:\n{summary or '(none)'}\n\n"
+        f"Recent conversation:\n{history_text}\n\n"
+        f"Latest student message:\n{question}\n\n"
+        "Return the standalone retrieval query without answering it."
+    )
+
+
+def build_conversational_prompt(question, standalone_query, passages, summary=""):
+    return (
+        "Conversation summary (context only; NEVER evidence):\n"
+        f"{summary or '(none)'}\n\n"
+        "Transcript excerpts (the ONLY medical evidence):\n\n"
+        f"{build_context(passages)}\n\n"
+        "----\n"
+        f"Original student question: {question}\n"
+        f"Standalone retrieval query: {standalone_query}\n\n"
+        "Answer the original question using only the transcript excerpts. "
+        "Use conversation memory only to understand references."
+    )
+
+
+def build_summary_prompt(previous_summary, messages):
+    conversation = "\n".join(
+        f"{role}: {content}" for role, content in messages
+    )
+    return (
+        f"Previous summary:\n{previous_summary or '(none)'}\n\n"
+        f"New conversation to incorporate:\n{conversation}\n\n"
+        "Produce the bounded updated conversational-state summary."
     )
 
 
