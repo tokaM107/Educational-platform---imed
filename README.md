@@ -264,6 +264,9 @@ only `/health` and the login route are public.
 | `POST /api/auth/password/reset` | check the code, set a new password (public) |
 | `GET /api/auth/me` | the application user behind the token |
 | `POST /api/chat` | question → grounded answer + video segments + citations |
+| `POST /api/chat/sessions` | create the authenticated student's chat thread for a lecture |
+| `GET /api/chat/sessions/{session_id}/messages` | list the caller's stored messages in order |
+| `POST /api/chat/sessions/{session_id}/messages` | generate and persist a student turn and tutor reply |
 | `GET /api/lectures` | lectures with chunk count and duration |
 | `GET /api/lectures/{id}/video` | the whole video, with byte-range support so seeking works |
 | `POST /api/events` | record one video event (insert only, deliberately trivial) |
