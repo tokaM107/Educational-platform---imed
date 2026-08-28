@@ -264,9 +264,10 @@ only `/health` and the login route are public.
 | `POST /api/auth/password/reset` | check the code, set a new password (public) |
 | `GET /api/auth/me` | the application user behind the token |
 | `POST /api/chat` | question → grounded answer + video segments + citations |
-| `POST /api/chat/sessions` | create the authenticated student's chat thread for a lecture |
-| `GET /api/chat/sessions/{session_id}/messages` | list the caller's stored messages in order |
-| `POST /api/chat/sessions/{session_id}/messages` | generate and persist a student turn and tutor reply |
+| `POST /api/chat/sessions` | create the authenticated student's lecture-scoped thread |
+| `GET /api/chat/sessions` | paginate the caller's threads, optionally by lecture |
+| `GET /api/chat/sessions/{session_id}/messages` | paginate the caller's stored messages in stable order |
+| `POST /api/chat/sessions/{session_id}/messages` | idempotently generate and persist a contextualized grounded turn |
 | `GET /api/lectures` | lectures with chunk count and duration |
 | `GET /api/lectures/{id}/video` | the whole video, with byte-range support so seeking works |
 | `POST /api/events` | record one video event (insert only, deliberately trivial) |
@@ -644,6 +645,17 @@ renderer that could drift out of step with the page.
 **Degraded mode** — if Gemini is overloaded, generation retries, then falls
 back to `CHAT_FALLBACK_MODEL`. If that fails too, the student still gets the
 retrieved video segment with a notice instead of an error.
+
+Conversational RAG budgets are configurable with `LLM_CONTEXT_WINDOW`,
+`CHAT_MAX_INPUT_TOKENS`, `CHAT_MAX_OUTPUT_TOKENS`,
+`CHAT_SAFETY_MARGIN_TOKENS`, `CHAT_REWRITE_HISTORY_TOKENS`,
+`CHAT_ANSWER_HISTORY_TOKENS`, `CHAT_SUMMARY_TOKENS`,
+`CHAT_TRANSCRIPT_TOKENS`, `CHAT_MAX_STUDENT_MESSAGE_TOKENS`,
+`CHAT_SUMMARY_UPDATE_THRESHOLD`, `CHAT_REWRITE_MAX_OUTPUT_TOKENS`,
+`CHAT_SUMMARY_MAX_OUTPUT_TOKENS`, `CHAT_HISTORY_LOAD_LIMIT`,
+`CHAT_RETRIEVAL_CANDIDATE_LIMIT`, and `CHAT_LLM_TIMEOUT_SECONDS`.
+The defaults cap input at 12,000 tokens and output at 1,200 tokens while still
+checking the configured model context window before every final generation.
 
 ## Tests
 
