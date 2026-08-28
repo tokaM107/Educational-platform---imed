@@ -81,6 +81,31 @@ def search(conn, query_embedding, top_k=None, lecture_id=None):
         ]
 
 
+def by_chunk_ids(conn, chunk_ids, lecture_id):
+    """Previously cited local context, still hard-scoped to this lecture."""
+    if not chunk_ids:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT c.id, c.lecture_id, l.title, c.text,
+                   c.start_ts, c.end_ts, 0.0 AS distance
+            FROM transcript_chunks AS c
+            JOIN lectures AS l ON l.id = c.lecture_id
+            WHERE c.lecture_id = %s AND c.id = ANY(%s)
+            ORDER BY array_position(%s::bigint[], c.id)
+            """,
+            (lecture_id, list(chunk_ids), list(chunk_ids)),
+        )
+        return [
+            Passage(
+                chunk_id=row[0], lecture_id=row[1], lecture_title=row[2],
+                text=row[3], start_ts=row[4], end_ts=row[5], distance=float(row[6]),
+            )
+            for row in cur.fetchall()
+        ]
+
+
 def keep_relevant(passages, max_distance=None):
     """Drop hits that are too far away to be about the question at all."""
 
