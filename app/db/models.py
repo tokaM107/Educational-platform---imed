@@ -21,6 +21,8 @@ from sqlalchemy import Select, select
 
 from app.db._generated_models import (
     Base,
+    ChatMessages,
+    ChatSessions,
     Courses,
     Enrollments,
     Lectures,
@@ -44,6 +46,8 @@ from app.db._generated_models import (
 
 __all__ = [
     "Base",
+    "ChatMessages",
+    "ChatSessions",
     "Courses",
     "Enrollments",
     "Lectures",
