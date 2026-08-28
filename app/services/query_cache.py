@@ -52,7 +52,7 @@ def get(conn, question, model, dim):
     return row[0] if row else None
 
 
-def put(conn, question, model, dim, embedding):
+def put(conn, question, model, dim, embedding, commit=True):
     """Store a freshly computed vector. Concurrent writers are harmless."""
 
     with conn.cursor() as cur:
@@ -66,10 +66,11 @@ def put(conn, question, model, dim, embedding):
             (cache_key(question), model, dim, normalise(question), embedding),
         )
 
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
-def embed_query(conn, embedder, question):
+def embed_query(conn, embedder, question, commit=True):
     """Cached embed: look it up, and only call the API on a miss."""
 
     model = embedder.settings.embed_model
@@ -83,6 +84,11 @@ def embed_query(conn, embedder, question):
 
     embedding = embedder.embed_query(question)
 
-    put(conn, question, model, dim, embedding)
+    if commit:
+        # Keep the historical call shape so test doubles and downstream callers
+        # that replace this helper remain compatible.
+        put(conn, question, model, dim, embedding)
+    else:
+        put(conn, question, model, dim, embedding, commit=False)
 
     return embedding
