@@ -15,6 +15,8 @@ from app.db import _generated_models, models
 # database without a migration disappears from the generated file, and this
 # list is what notices.
 EXPECTED_TABLES = {
+    "chat_messages",
+    "chat_sessions",
     "courses",
     "enrollments",
     "lectures",
@@ -94,3 +96,17 @@ def test_generated_file_says_not_to_edit_it():
         first_line = handle.readline()
 
     assert "DO NOT EDIT" in first_line
+
+
+def test_chat_memory_schema_metadata_is_reflected():
+    sessions = models.ChatSessions.__table__.columns
+    messages = models.ChatMessages.__table__.columns
+    assert {"memory_summary", "summary_token_count", "summary_tokenizer_name",
+            "summarized_until_message_order", "next_message_order"} <= set(sessions.keys())
+    assert {"message_order", "token_count", "tokenizer_name", "model_name",
+            "prompt_version", "input_tokens", "output_tokens", "grounded",
+            "status", "failure_code", "idempotency_key",
+            "reply_to_message_id"} <= set(messages.keys())
+    index_names = {index.name for index in models.ChatMessages.__table__.indexes}
+    assert "uq_chat_messages_session_order" in index_names
+    assert "uq_chat_messages_user_idempotency" in index_names
