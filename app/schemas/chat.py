@@ -1,6 +1,11 @@
-from typing import Literal
+from datetime import datetime
+from typing import Annotated, Literal
+from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
+
+
+NonBlankText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class ChatMessage(BaseModel):
@@ -45,6 +50,48 @@ class Citation(BaseModel):
     end_ts: int
     text: str
     distance: float
+
+
+class ChatSessionCreate(BaseModel):
+    """Start a thread for one lecture; the token supplies the student."""
+
+    lecture_id: int
+    title: str | None = Field(default=None, max_length=255)
+
+
+class ChatSession(BaseModel):
+    id: UUID
+    student_id: int
+    lecture_id: int
+    title: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChatMessageCreate(BaseModel):
+    """A student's next turn. Assistant messages are server-generated."""
+
+    content: NonBlankText
+
+
+class StoredChatMessage(BaseModel):
+    id: int
+    session_id: UUID
+    role: Literal["user", "assistant"]
+    content: str
+    standalone_query: str | None = None
+    citations: list[Citation] | None = None
+    created_at: datetime
+
+
+class ChatTurnResponse(BaseModel):
+    """The two persisted messages plus the video navigation for this answer."""
+
+    user_message: StoredChatMessage
+    assistant_message: StoredChatMessage
+    grounded: bool
+    segments: list[VideoSegment] = Field(default_factory=list)
+    notice: str | None = None
 
 
 class ChatResponse(BaseModel):
