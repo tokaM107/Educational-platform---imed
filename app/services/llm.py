@@ -7,6 +7,9 @@ before giving up.
 
 import logging
 import time
+from dataclasses import dataclass
+
+import httpx
 
 from google import genai
 from google.genai import errors
@@ -24,6 +27,14 @@ class LLMUnavailable(RuntimeError):
     """Every model and retry failed. Callers can still show the video segment."""
 
 
+@dataclass(frozen=True)
+class GeneratedReply:
+    parsed: object
+    model_name: str
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
 class ChatModel:
 
     def __init__(self, settings=None, client=None):
@@ -31,7 +42,10 @@ class ChatModel:
         self.settings = settings or get_settings()
 
         self.client = client or genai.Client(
-            api_key=self.settings.require_gemini_api_key()
+            api_key=self.settings.require_gemini_api_key(),
+            http_options=types.HttpOptions(
+                timeout=int(self.settings.chat_llm_timeout_seconds * 1000)
+            ),
         )
 
     def generate(self, system_instruction, user_prompt, response_schema, history=None,
@@ -46,6 +60,22 @@ class ChatModel:
         report does not, so callers with a larger reply must raise it.
         """
 
+        return self.generate_with_metadata(
+            system_instruction=system_instruction,
+            user_prompt=user_prompt,
+            response_schema=response_schema,
+            history=history,
+            max_output_tokens=max_output_tokens,
+        ).parsed
+
+    def generate_with_metadata(
+        self,
+        system_instruction,
+        user_prompt,
+        response_schema,
+        history=None,
+        max_output_tokens=2048,
+    ):
         contents = self._build_contents(user_prompt, history)
 
         config = types.GenerateContentConfig(
@@ -81,19 +111,34 @@ class ChatModel:
                             f"{model} returned no parsable reply"
                         )
 
-                    return response.parsed
+                    usage = response.usage_metadata
+                    return GeneratedReply(
+                        parsed=response.parsed,
+                        model_name=response.model_version or model,
+                        input_tokens=(
+                            int(usage.prompt_token_count)
+                            if usage and usage.prompt_token_count is not None
+                            else None
+                        ),
+                        output_tokens=(
+                            int(usage.candidates_token_count)
+                            if usage and usage.candidates_token_count is not None
+                            else None
+                        ),
+                    )
 
-                except errors.APIError as error:
+                except (errors.APIError, httpx.TimeoutException) as error:
 
                     last_error = error
 
-                    if getattr(error, "code", None) not in RETRYABLE:
+                    code = getattr(error, "code", None)
+                    if code is not None and code not in RETRYABLE:
                         raise
 
                     logger.warning(
                         "chat model %s failed (%s), attempt %s",
                         model,
-                        getattr(error, "code", "?"),
+                        code or "timeout",
                         attempt + 1,
                     )
 
