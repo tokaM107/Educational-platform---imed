@@ -163,10 +163,10 @@ class Users(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), nullable=False, server_default=text('now()'))
     is_suspended: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text('false'), comment='When true, NestJS refuses login and refresh for this student or teacher. Default false so FastAPI-created rows stay able to sign in.')
     password_hash: Mapped[Optional[str]] = mapped_column(Text, comment='argon2id hash. Written only by the NestJS API; NULL means the account cannot log in yet.')
+    birth_date: Mapped[Optional[datetime.date]] = mapped_column(Date, comment='Calendar date of birth. Written by NestJS student signup; nullable so existing FastAPI rows stay valid.')
     phone: Mapped[Optional[str]] = mapped_column(String(20))
     phone_verified_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True))
     auth_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
-    birth_date: Mapped[Optional[datetime.date]] = mapped_column(Date, comment='Calendar date of birth. Written by NestJS student signup; nullable so existing FastAPI rows stay valid.')
 
     access_code_batches: Mapped[list['AccessCodeBatches']] = relationship('AccessCodeBatches', back_populates='instructor')
     password_reset_codes: Mapped[list['PasswordResetCodes']] = relationship('PasswordResetCodes', back_populates='user')
@@ -181,6 +181,7 @@ class Users(Base):
     report_narratives: Mapped[list['ReportNarratives']] = relationship('ReportNarratives', back_populates='student')
     exam_attempts: Mapped[list['ExamAttempts']] = relationship('ExamAttempts', back_populates='user')
     lectures: Mapped[list['Lectures']] = relationship('Lectures', back_populates='doctor')
+    chat_sessions: Mapped[list['ChatSessions']] = relationship('ChatSessions', back_populates='student')
     reports: Mapped[list['Reports']] = relationship('Reports', back_populates='student')
     video_events: Mapped[list['VideoEvents']] = relationship('VideoEvents', back_populates='student')
     notifications_student: Mapped[list['Notifications']] = relationship('Notifications', foreign_keys='[Notifications.student_id]', back_populates='student')
@@ -719,19 +720,53 @@ class Lectures(Base):
     doctor_id: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), nullable=False, server_default=text('now()'))
-    video_url: Mapped[Optional[str]] = mapped_column(Text)
     course_id: Mapped[Optional[int]] = mapped_column(Integer)
     module_id: Mapped[Optional[int]] = mapped_column(Integer)
+    video_url: Mapped[Optional[str]] = mapped_column(Text)
     bunny_video_id: Mapped[Optional[str]] = mapped_column(Text)
 
     course_doctor: Mapped[Optional['Courses']] = relationship('Courses', foreign_keys=[course_id, doctor_id], back_populates='lectures_course_doctor')
     course: Mapped[Optional['Courses']] = relationship('Courses', foreign_keys=[course_id], back_populates='lectures_course')
     doctor: Mapped['Users'] = relationship('Users', back_populates='lectures')
     module: Mapped[Optional['Modules']] = relationship('Modules', back_populates='lectures')
+    chat_sessions: Mapped[list['ChatSessions']] = relationship('ChatSessions', back_populates='lecture')
     questions: Mapped[list['Questions']] = relationship('Questions', back_populates='lecture')
     reports: Mapped[list['Reports']] = relationship('Reports', back_populates='lecture')
     transcript_chunks: Mapped[list['TranscriptChunks']] = relationship('TranscriptChunks', back_populates='lecture')
     video_events: Mapped[list['VideoEvents']] = relationship('VideoEvents', back_populates='lecture')
+
+
+class ChatSessions(Base):
+    __tablename__ = 'chat_sessions'
+    __table_args__ = (
+        CheckConstraint('next_message_order > 0', name='chat_sessions_next_message_order_check'),
+        CheckConstraint('summarized_until_message_order >= 0', name='chat_sessions_summary_checkpoint_check'),
+        CheckConstraint('summary_token_count >= 0', name='chat_sessions_summary_token_count_check'),
+        ForeignKeyConstraint(['lecture_id'], ['public.lectures.id'], ondelete='CASCADE', name='chat_sessions_lecture_id_fkey'),
+        ForeignKeyConstraint(['student_id'], ['public.users.id'], ondelete='CASCADE', name='chat_sessions_student_id_fkey'),
+        PrimaryKeyConstraint('id', name='chat_sessions_pkey'),
+        Index('idx_chat_sessions_student_lecture_updated', 'student_id', 'lecture_id', 'updated_at', 'id'),
+        Index('idx_chat_sessions_student_updated', 'student_id', 'updated_at', 'id'),
+        {'comment': 'FastAPI-owned student chat sessions. RLS enabled with no '
+                'policies.',
+     'schema': 'public'}
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, server_default=text('gen_random_uuid()'))
+    student_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    lecture_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), nullable=False, server_default=text('now()'))
+    updated_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), nullable=False, server_default=text('now()'))
+    memory_summary: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''::text"), comment='Bounded conversational state only; never medical evidence.')
+    summary_token_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text('0'))
+    summarized_until_message_order: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text('0'), comment='Atomic high-water mark for messages incorporated into memory_summary.')
+    next_message_order: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text('1'))
+    title: Mapped[Optional[str]] = mapped_column(Text)
+    summary_tokenizer_name: Mapped[Optional[str]] = mapped_column(Text)
+
+    lecture: Mapped['Lectures'] = relationship('Lectures', back_populates='chat_sessions')
+    student: Mapped['Users'] = relationship('Users', back_populates='chat_sessions')
+    chat_messages: Mapped[list['ChatMessages']] = relationship('ChatMessages', back_populates='session')
 
 
 class ExamOptions(Base):
@@ -847,6 +882,51 @@ class VideoEvents(Base):
 
     lecture: Mapped['Lectures'] = relationship('Lectures', back_populates='video_events')
     student: Mapped['Users'] = relationship('Users', back_populates='video_events')
+
+
+class ChatMessages(Base):
+    __tablename__ = 'chat_messages'
+    __table_args__ = (
+        CheckConstraint('(input_tokens IS NULL OR input_tokens >= 0) AND (output_tokens IS NULL OR output_tokens >= 0)', name='chat_messages_provider_tokens_check'),
+        CheckConstraint("role::text = ANY (ARRAY['user'::character varying, 'assistant'::character varying]::text[])", name='chat_messages_role_check'),
+        CheckConstraint("status::text = ANY (ARRAY['pending'::character varying, 'completed'::character varying, 'failed'::character varying]::text[])", name='chat_messages_status_check'),
+        CheckConstraint('token_count >= 0', name='chat_messages_token_count_check'),
+        ForeignKeyConstraint(['reply_to_message_id'], ['public.chat_messages.id'], ondelete='SET NULL', name='chat_messages_reply_to_message_id_fkey'),
+        ForeignKeyConstraint(['session_id'], ['public.chat_sessions.id'], ondelete='CASCADE', name='chat_messages_session_id_fkey'),
+        PrimaryKeyConstraint('id', name='chat_messages_pkey'),
+        Index('idx_chat_messages_session_created', 'session_id', 'created_at'),
+        Index('idx_chat_messages_session_order_desc', 'session_id', 'message_order'),
+        Index('uq_chat_messages_assistant_reply', 'reply_to_message_id', postgresql_where="(((role)::text = 'assistant'::text) AND (reply_to_message_id IS NOT NULL))", unique=True),
+        Index('uq_chat_messages_session_order', 'session_id', 'message_order', unique=True),
+        Index('uq_chat_messages_user_idempotency', 'session_id', 'idempotency_key', postgresql_where="(((role)::text = 'user'::text) AND (idempotency_key IS NOT NULL))", unique=True),
+        {'comment': 'FastAPI-owned chat messages and retrieval citations. RLS enabled '
+                'with no policies.',
+     'schema': 'public'}
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), nullable=False, server_default=text('now()'))
+    message_order: Mapped[int] = mapped_column(BigInteger, nullable=False, comment='Stable order allocated under a session row lock; timestamps are not ordering keys.')
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text('0'))
+    tokenizer_name: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'legacy-unknown'::text"))
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default=text("'completed'::character varying"))
+    standalone_query: Mapped[Optional[str]] = mapped_column(Text)
+    citations: Mapped[Optional[dict]] = mapped_column(JSONB)
+    model_name: Mapped[Optional[str]] = mapped_column(Text)
+    prompt_version: Mapped[Optional[str]] = mapped_column(Text)
+    input_tokens: Mapped[Optional[int]] = mapped_column(Integer)
+    output_tokens: Mapped[Optional[int]] = mapped_column(Integer)
+    grounded: Mapped[Optional[bool]] = mapped_column(Boolean)
+    failure_code: Mapped[Optional[str]] = mapped_column(Text)
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(255), comment='Client retry key, unique per session for user messages.')
+    reply_to_message_id: Mapped[Optional[int]] = mapped_column(BigInteger)
+
+    reply_to_message: Mapped[Optional['ChatMessages']] = relationship('ChatMessages', remote_side=[id], back_populates='reply_to_message_reverse')
+    reply_to_message_reverse: Mapped[list['ChatMessages']] = relationship('ChatMessages', remote_side=[reply_to_message_id], back_populates='reply_to_message')
+    session: Mapped['ChatSessions'] = relationship('ChatSessions', back_populates='chat_messages')
 
 
 class Notifications(Base):
