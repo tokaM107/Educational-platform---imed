@@ -43,12 +43,67 @@ class Settings:
         # --- Models ---
         self.embed_model = os.getenv("EMBED_MODEL", "gemini-embedding-2")
         self.embed_dim = int(os.getenv("EMBED_DIM", "1536"))
-        self.chat_model = os.getenv("CHAT_MODEL", "gemini-3.7-flash")
+        self.chat_model = os.getenv("CHAT_MODEL", "gemini-3.1-flash-lite")
 
         # Used when the primary model answers 429/503. Newer flash models get
         # busy; an older one is usually free and good enough for restating a
         # transcript.
         self.chat_fallback_model = os.getenv("CHAT_FALLBACK_MODEL", "gemini-2.5-flash")
+
+        # --- Conversational RAG token budgets ---
+        # Product limits are deliberately far below Gemini's context window to
+        # bound latency and cost. The full prompt is checked against both.
+        self.llm_context_window = int(env("LLM_CONTEXT_WINDOW", "1048576"))
+        self.chat_max_input_tokens = int(env("CHAT_MAX_INPUT_TOKENS", "12000"))
+        self.chat_max_output_tokens = int(env("CHAT_MAX_OUTPUT_TOKENS", "1200"))
+        self.chat_safety_margin_tokens = int(
+            env("CHAT_SAFETY_MARGIN_TOKENS", "500")
+        )
+        self.chat_rewrite_history_tokens = int(
+            env("CHAT_REWRITE_HISTORY_TOKENS", "2000")
+        )
+        self.chat_answer_history_tokens = int(
+            env("CHAT_ANSWER_HISTORY_TOKENS", "2500")
+        )
+        self.chat_summary_tokens = int(env("CHAT_SUMMARY_TOKENS", "1000"))
+        self.chat_transcript_tokens = int(env("CHAT_TRANSCRIPT_TOKENS", "6000"))
+        self.chat_max_student_message_tokens = int(
+            env("CHAT_MAX_STUDENT_MESSAGE_TOKENS", "1500")
+        )
+        self.chat_summary_update_threshold = int(
+            env("CHAT_SUMMARY_UPDATE_THRESHOLD", "3500")
+        )
+        self.chat_rewrite_max_output_tokens = int(
+            env("CHAT_REWRITE_MAX_OUTPUT_TOKENS", "160")
+        )
+        self.chat_summary_max_output_tokens = int(
+            env("CHAT_SUMMARY_MAX_OUTPUT_TOKENS", "1000")
+        )
+        self.chat_history_load_limit = int(env("CHAT_HISTORY_LOAD_LIMIT", "100"))
+        self.chat_retrieval_candidate_limit = int(
+            env("CHAT_RETRIEVAL_CANDIDATE_LIMIT", "30")
+        )
+        self.chat_llm_timeout_seconds = float(env("CHAT_LLM_TIMEOUT_SECONDS", "30"))
+
+        if min(
+            self.llm_context_window,
+            self.chat_max_input_tokens,
+            self.chat_max_output_tokens,
+            self.chat_safety_margin_tokens,
+            self.chat_max_student_message_tokens,
+        ) <= 0:
+            raise ValueError("chat token limits must all be positive")
+
+        if (
+            self.chat_max_input_tokens
+            + self.chat_max_output_tokens
+            + self.chat_safety_margin_tokens
+            > self.llm_context_window
+        ):
+            raise ValueError(
+                "CHAT_MAX_INPUT_TOKENS + CHAT_MAX_OUTPUT_TOKENS + "
+                "CHAT_SAFETY_MARGIN_TOKENS exceeds LLM_CONTEXT_WINDOW"
+            )
 
         # The free tier counts every text in a batch as one request and allows
         # 100 per minute, so the ingest pipeline has to pace itself.
