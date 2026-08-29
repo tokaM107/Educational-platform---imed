@@ -66,7 +66,6 @@ class Settings:
             env("CHAT_ANSWER_HISTORY_TOKENS", "2500")
         )
         self.chat_summary_tokens = int(env("CHAT_SUMMARY_TOKENS", "1000"))
-        self.chat_transcript_tokens = int(env("CHAT_TRANSCRIPT_TOKENS", "6000"))
         self.chat_max_student_message_tokens = int(
             env("CHAT_MAX_STUDENT_MESSAGE_TOKENS", "1500")
         )
@@ -84,6 +83,15 @@ class Settings:
             env("CHAT_RETRIEVAL_CANDIDATE_LIMIT", "30")
         )
         self.chat_llm_timeout_seconds = float(env("CHAT_LLM_TIMEOUT_SECONDS", "30"))
+        self.chat_prompt_resize_max_attempts = int(
+            env("CHAT_PROMPT_RESIZE_MAX_ATTEMPTS", "8")
+        )
+        self.chat_token_count_retry_attempts = int(
+            env("CHAT_TOKEN_COUNT_RETRY_ATTEMPTS", "2")
+        )
+        self.chat_token_count_retry_delay_seconds = float(
+            env("CHAT_TOKEN_COUNT_RETRY_DELAY_SECONDS", "0.25")
+        )
 
         if min(
             self.llm_context_window,
@@ -91,6 +99,8 @@ class Settings:
             self.chat_max_output_tokens,
             self.chat_safety_margin_tokens,
             self.chat_max_student_message_tokens,
+            self.chat_prompt_resize_max_attempts,
+            self.chat_token_count_retry_attempts,
         ) <= 0:
             raise ValueError("chat token limits must all be positive")
 
