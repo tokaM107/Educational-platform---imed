@@ -1,10 +1,16 @@
 from types import SimpleNamespace
+import inspect
+
+import httpx
+import pytest
 
 from app.services.chat_memory import (
     MemoryMessage, messages_to_summarize, select_passages, select_recent_turns,
 )
+from app.services import token_budget
 from app.services.token_budget import (
-    CountedTokens, PromptTooLarge, ProviderTokenCounter, validate_prompt_size,
+    CountedTokens, ExactTokenCountUnavailable, PromptTooLarge,
+    ProviderTokenCounter, validate_prompt_size,
 )
 
 
@@ -84,3 +90,88 @@ def test_complete_prompt_prefers_official_provider_count():
     result = counter.count_complete_prompt("system", [("user", "مرحبا hello")])
     assert result == CountedTokens(321, "google-api:gemini-test", estimated=False)
     assert calls[0]["model"] == "gemini-test"
+    assert "config" not in calls[0]
+    assert calls[0]["contents"][0].parts[0].text == (
+        "<system_instruction>\nsystem\n</system_instruction>"
+    )
+
+
+def test_real_client_shape_counts_exact_generate_content_request():
+    calls = []
+    class ApiClient:
+        def request(self, method, path, body):
+            calls.append((method, path, body))
+            return SimpleNamespace(body={"totalTokens": 41})
+    client = SimpleNamespace(_api_client=ApiClient())
+    counter = ProviderTokenCounter("gemini-test", client)
+
+    counted = counter.count_complete_prompt(
+        "system", [("assistant", "prior answer"), ("user", "question")]
+    )
+
+    request = calls[0][2]["generateContentRequest"]
+    assert counted == CountedTokens(41, "google-api:gemini-test", False)
+    assert calls[0][:2] == ("post", "models/gemini-test:countTokens")
+    assert request["model"] == "models/gemini-test"
+    assert request["systemInstruction"]["parts"][0]["text"] == "system"
+    assert [content["role"] for content in request["contents"]] == [
+        "model", "user"
+    ]
+
+
+def test_provider_count_failure_fails_closed_without_local_fallback():
+    class BrokenModels:
+        def count_tokens(self, **kwargs):
+            raise OSError("temporary provider failure")
+
+    counter = ProviderTokenCounter(
+        "gemini-test", SimpleNamespace(models=BrokenModels())
+    )
+    with pytest.raises(ExactTokenCountUnavailable):
+        counter.count_complete_prompt("system", [("user", "hello " * 30)])
+
+
+def test_provisional_estimator_has_no_local_model_or_huggingface_dependency():
+    source = inspect.getsource(token_budget)
+    counter = ProviderTokenCounter("gemini-4-test")
+    passages = [
+        SimpleNamespace(chunk_id=1, text="سري للغاية pneumatic bones", distance=.1),
+        SimpleNamespace(chunk_id=2, text="second passage", distance=.2),
+    ]
+
+    selected = select_passages(passages, budget=200, counter=counter)
+    counted = counter.count_text("عظمة pneumatic bone")
+
+    assert [item.chunk_id for item in selected] == [1, 2]
+    assert counted.estimated is True
+    assert counted.tokenizer_name.startswith("estimate:utf8-bytes-div-2:v1")
+    assert "local_tokenizer" not in source
+    assert "transformers" not in source
+    assert "torchvision" not in source
+
+
+@pytest.mark.parametrize("network_error", [
+    httpx.ReadTimeout("temporary timeout"),
+    httpx.ConnectError("temporary DNS/connect failure"),
+])
+def test_official_count_retries_a_transient_transport_error_then_succeeds(
+    network_error,
+):
+    class Models:
+        calls = 0
+        def count_tokens(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise network_error
+            return SimpleNamespace(total_tokens=42)
+
+    models = Models()
+    counter = ProviderTokenCounter(
+        "gemini-test", SimpleNamespace(models=models),
+        retry_attempts=2, retry_delay_seconds=0,
+    )
+
+    counted = counter.count_complete_prompt("system", [("user", "question")])
+
+    assert counted == CountedTokens(42, "google-api:gemini-test", False)
+    assert models.calls == 2
