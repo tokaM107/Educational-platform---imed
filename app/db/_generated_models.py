@@ -739,6 +739,7 @@ class Lectures(Base):
 class ChatSessions(Base):
     __tablename__ = 'chat_sessions'
     __table_args__ = (
+        CheckConstraint('(summary_input_tokens IS NULL OR summary_input_tokens >= 0) AND (summary_output_tokens IS NULL OR summary_output_tokens >= 0) AND (summary_total_tokens IS NULL OR summary_total_tokens >= 0)', name='chat_sessions_summary_provider_tokens_check'),
         CheckConstraint('next_message_order > 0', name='chat_sessions_next_message_order_check'),
         CheckConstraint('summarized_until_message_order >= 0', name='chat_sessions_summary_checkpoint_check'),
         CheckConstraint('summary_token_count >= 0', name='chat_sessions_summary_token_count_check'),
@@ -763,6 +764,11 @@ class ChatSessions(Base):
     next_message_order: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text('1'))
     title: Mapped[Optional[str]] = mapped_column(Text)
     summary_tokenizer_name: Mapped[Optional[str]] = mapped_column(Text)
+    summary_model_name: Mapped[Optional[str]] = mapped_column(Text)
+    summary_prompt_version: Mapped[Optional[str]] = mapped_column(Text)
+    summary_input_tokens: Mapped[Optional[int]] = mapped_column(Integer)
+    summary_output_tokens: Mapped[Optional[int]] = mapped_column(Integer)
+    summary_total_tokens: Mapped[Optional[int]] = mapped_column(Integer, comment='Provider-reported total tokens for the latest rolling-summary update.')
 
     lecture: Mapped['Lectures'] = relationship('Lectures', back_populates='chat_sessions')
     student: Mapped['Users'] = relationship('Users', back_populates='chat_sessions')
@@ -891,6 +897,7 @@ class ChatMessages(Base):
         CheckConstraint("role::text = ANY (ARRAY['user'::character varying, 'assistant'::character varying]::text[])", name='chat_messages_role_check'),
         CheckConstraint("status::text = ANY (ARRAY['pending'::character varying, 'completed'::character varying, 'failed'::character varying]::text[])", name='chat_messages_status_check'),
         CheckConstraint('token_count >= 0', name='chat_messages_token_count_check'),
+        CheckConstraint('total_tokens IS NULL OR total_tokens >= 0', name='chat_messages_total_tokens_check'),
         ForeignKeyConstraint(['reply_to_message_id'], ['public.chat_messages.id'], ondelete='SET NULL', name='chat_messages_reply_to_message_id_fkey'),
         ForeignKeyConstraint(['session_id'], ['public.chat_sessions.id'], ondelete='CASCADE', name='chat_messages_session_id_fkey'),
         PrimaryKeyConstraint('id', name='chat_messages_pkey'),
@@ -923,6 +930,7 @@ class ChatMessages(Base):
     failure_code: Mapped[Optional[str]] = mapped_column(Text)
     idempotency_key: Mapped[Optional[str]] = mapped_column(String(255), comment='Client retry key, unique per session for user messages.')
     reply_to_message_id: Mapped[Optional[int]] = mapped_column(BigInteger)
+    total_tokens: Mapped[Optional[int]] = mapped_column(Integer, comment='Provider-reported prompt + candidate + thinking tokens when available.')
 
     reply_to_message: Mapped[Optional['ChatMessages']] = relationship('ChatMessages', remote_side=[id], back_populates='reply_to_message_reverse')
     reply_to_message_reverse: Mapped[list['ChatMessages']] = relationship('ChatMessages', remote_side=[reply_to_message_id], back_populates='reply_to_message')
