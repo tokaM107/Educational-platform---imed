@@ -22,7 +22,8 @@ from app.services.chat_memory import (
     MemoryMessage, bound_text, messages_to_summarize,
 )
 from app.services.token_budget import (
-    PromptTooLarge, ProviderTokenCounter, effective_input_limit,
+    ExactTokenCountUnavailable, PromptTooLarge, ProviderTokenCounter,
+    effective_input_limit,
 )
 from app.services.prompts import to_stamp
 
@@ -33,7 +34,7 @@ router = APIRouter(prefix="/api", tags=["Tutor"])
 MESSAGE_COLUMNS = """
     id, session_id, message_order, role, content, standalone_query, citations,
     token_count, tokenizer_name, model_name, prompt_version, input_tokens,
-    output_tokens, status, failure_code, grounded, created_at
+    output_tokens, total_tokens, status, failure_code, grounded, created_at
 """
 
 
@@ -67,7 +68,8 @@ def _stored_message(row):
         content=row[4], standalone_query=row[5], citations=row[6] or [],
         token_count=row[7], tokenizer_name=row[8], model_name=row[9],
         prompt_version=row[10], input_tokens=row[11], output_tokens=row[12],
-        status=row[13], failure_code=row[14], grounded=row[15], created_at=row[16],
+        total_tokens=row[13], status=row[14], failure_code=row[15],
+        grounded=row[16], created_at=row[17],
     )
 
 
@@ -100,6 +102,9 @@ def _turn_response(user_message, assistant_message, segments=None, notice=None,
     output_values = [value for value in (
         user_message.output_tokens, assistant_message.output_tokens
     ) if value is not None]
+    total_values = [value for value in (
+        user_message.total_tokens, assistant_message.total_tokens
+    ) if value is not None]
     return ChatTurnResponse(
         user_message=user_message, assistant_message=assistant_message,
         original_question=user_message.content,
@@ -110,6 +115,7 @@ def _turn_response(user_message, assistant_message, segments=None, notice=None,
         token_usage=TokenUsage(
             input_tokens=sum(input_values) if input_values else None,
             output_tokens=sum(output_values) if output_values else None,
+            total_tokens=sum(total_values) if total_values else None,
             assembled_prompt_tokens=prompt_count,
             tokenizer_name=prompt_tokenizer_name or assistant_message.tokenizer_name,
             estimated=estimated,
@@ -233,10 +239,16 @@ def _update_summary(conn, session_id, previous_summary, checkpoint,
                 UPDATE chat_sessions
                 SET memory_summary = %s, summary_token_count = %s,
                     summary_tokenizer_name = %s,
-                    summarized_until_message_order = %s
+                    summarized_until_message_order = %s,
+                    summary_model_name = %s, summary_prompt_version = %s,
+                    summary_input_tokens = %s, summary_output_tokens = %s,
+                    summary_total_tokens = %s
                 WHERE id = %s AND summarized_until_message_order = %s
             """, (summary, counted.count, counted.tokenizer_name,
-                  candidates[-1].message_order, session_id, checkpoint))
+                  candidates[-1].message_order, generated.model_name,
+                  prompts.SUMMARY_PROMPT_VERSION, generated.input_tokens,
+                  generated.output_tokens, generated.total_tokens,
+                  session_id, checkpoint))
         logger.info(
             "chat_summary_updated session=%s model=%s prompt_version=%s "
             "input_tokens=%s output_tokens=%s checkpoint=%s latency_ms=%s",
@@ -361,6 +373,18 @@ def create_chat_message(session_id: UUID, data: ChatMessageCreate,
             """, (user_row[0],))
         conn.commit()
         raise HTTPException(status_code=422, detail=str(error))
+    except ExactTokenCountUnavailable as error:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE chat_messages
+                SET status = 'failed', failure_code = 'token_count_unavailable'
+                WHERE id = %s
+            """, (user_row[0],))
+        conn.commit()
+        raise HTTPException(
+            status_code=503,
+            detail="تعذر التحقق من حجم الطلب دلوقتي. جرّب تاني بعد شوية.",
+        ) from error
     except Exception as error:
         logger.exception("chat generation failed session=%s", session_id)
         with conn.cursor() as cur:
@@ -378,25 +402,27 @@ def create_chat_message(session_id: UUID, data: ChatMessageCreate,
         cur.execute(f"""
             UPDATE chat_messages
             SET standalone_query = %s, status = 'completed', model_name = %s,
-                prompt_version = %s, input_tokens = %s, output_tokens = %s
+                prompt_version = %s, input_tokens = %s, output_tokens = %s,
+                total_tokens = %s
             WHERE id = %s
             RETURNING {MESSAGE_COLUMNS}
         """, (result.standalone_query or data.content, result.rewrite_model_name,
               prompts.REWRITE_PROMPT_VERSION, result.rewrite_input_tokens,
-              result.rewrite_output_tokens, user_row[0]))
+              result.rewrite_output_tokens, result.rewrite_total_tokens,
+              user_row[0]))
         saved_user = cur.fetchone()
         cur.execute(f"""
             INSERT INTO chat_messages
                 (session_id, message_order, role, content, citations, token_count,
                  tokenizer_name, model_name, prompt_version, input_tokens,
-                 output_tokens, status, reply_to_message_id, grounded)
+                 output_tokens, total_tokens, status, reply_to_message_id, grounded)
             VALUES (%s, %s, 'assistant', %s, %s, %s, %s, %s, %s, %s, %s,
-                    'completed', %s, %s)
+                    %s, 'completed', %s, %s)
             RETURNING {MESSAGE_COLUMNS}
         """, (session_id, next_order + 1, result.answer, Jsonb(citation_payload),
               answer_count.count, answer_count.tokenizer_name, result.model_name,
               result.prompt_version, result.input_tokens, result.output_tokens,
-              user_row[0], result.grounded))
+              result.total_tokens, user_row[0], result.grounded))
         saved_assistant = cur.fetchone()
 
     _update_summary(conn, session_id, summary, checkpoint, tutor, counter, settings)
@@ -422,10 +448,16 @@ def create_chat_message(session_id: UUID, data: ChatMessageCreate,
 @router.post("/chat", response_model=ChatResponse)
 def chat(data: ChatRequest, conn=Depends(get_conn), tutor=Depends(get_tutor),
          current_user=Depends(get_current_user)):
-    result = tutor.ask(
-        conn, question=data.message, lecture_id=data.lecture_id,
-        history=[(message.role, message.content) for message in data.history],
-    )
+    try:
+        result = tutor.ask(
+            conn, question=data.message, lecture_id=data.lecture_id,
+            history=[(message.role, message.content) for message in data.history],
+        )
+    except ExactTokenCountUnavailable as error:
+        raise HTTPException(
+            status_code=503,
+            detail="تعذر التحقق من حجم الطلب دلوقتي. جرّب تاني بعد شوية.",
+        ) from error
     return ChatResponse(answer=result.answer, grounded=result.grounded,
                         segments=_segments(result), citations=_citations(result),
                         notice=result.notice)
