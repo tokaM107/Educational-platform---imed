@@ -8,8 +8,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from google.genai import errors as genai_errors
 
 from app.api import (auth, chat, events, exams, lectures, notifications,
@@ -84,17 +83,37 @@ def health_check():
 
 
 # -------------------------
-# Demo UI
+# Optional demo UI
 # -------------------------
 
-app.mount(
-    "/static",
-    StaticFiles(directory=settings.static_dir),
-    name="static",
-)
+def register_demo_ui(application, app_settings):
+    """Register local-only UI routes when explicitly enabled and available."""
+
+    if not app_settings.enable_demo_ui:
+        return False
+
+    if not app_settings.static_dir.is_dir():
+        logging.getLogger(__name__).warning(
+            "ENABLE_DEMO_UI is true but %s does not exist; demo UI disabled",
+            app_settings.static_dir,
+        )
+        return False
+
+    # Keep UI-only imports out of the default production startup path.
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    application.mount(
+        "/static",
+        StaticFiles(directory=app_settings.static_dir),
+        name="static",
+    )
+
+    @application.get("/", include_in_schema=False)
+    def demo_page():
+        return FileResponse(app_settings.static_dir / "index.html")
+
+    return True
 
 
-@app.get("/", include_in_schema=False)
-def demo_page():
-
-    return FileResponse(settings.static_dir / "index.html")
+register_demo_ui(app, settings)
