@@ -42,12 +42,12 @@ class FakeTutor:
 
 
 def message_row(message_id, order, role, content, *, standalone=None, citations=None,
-                status="completed", reply_grounded=None):
+                status="completed", reply_grounded=None, total_tokens=None):
     return (message_id, SESSION_ID, order, role, content, standalone, citations or [],
             3, "fake:model-v1", "gemini-test" if role == "assistant" else None,
             "lecture-answer-v2" if role == "assistant" else None,
             20 if role == "assistant" else None, 4 if role == "assistant" else None,
-            status, None, reply_grounded, NOW)
+            total_tokens, status, None, reply_grounded, NOW)
 
 
 @pytest.fixture
@@ -139,16 +139,19 @@ def test_post_message_persists_standalone_query_citations_and_usage(api):
         answer="Radius", grounded=True,
         standalone_query="What did the lecturer call it?", passages=[passage],
         segments=[segment], model_name="gemini-test", input_tokens=31,
-        output_tokens=5, prompt_token_count=27,
+        output_tokens=5, total_tokens=36, prompt_token_count=27,
         prompt_tokenizer_name="fake:model-v1",
+        rewrite_model_name="gemini-test", rewrite_input_tokens=8,
+        rewrite_output_tokens=3, rewrite_total_tokens=11,
     ))
     user_pending = message_row(21, 1, "user", "What is it?", status="pending")
     user_done = message_row(21, 1, "user", "What is it?",
-                            standalone="What did the lecturer call it?")
+                            standalone="What did the lecturer call it?",
+                            total_tokens=11)
     citation = {"index": 1, "chunk_id": 9, "lecture_id": 7, "start_ts": 10,
                 "end_ts": 20, "text": "source", "distance": 0.2346}
     assistant = message_row(22, 2, "assistant", "Radius", citations=[citation],
-                            reply_grounded=True)
+                            reply_grounded=True, total_tokens=36)
 
     def answer(sql, params):
         if "FROM chat_sessions WHERE" in sql and "FOR UPDATE" in sql:
@@ -176,6 +179,11 @@ def test_post_message_persists_standalone_query_citations_and_usage(api):
     assert body["standalone_query"] == "What did the lecturer call it?"
     assert body["citations"][0]["start_ts"] == 10
     assert body["token_usage"]["input_tokens"] == 20  # provider value stored in row
+    assert body["token_usage"]["total_tokens"] == 47
+    rewrite_params = conn.params_for("standalone_query = %s")
+    assert rewrite_params[5] == 11
+    answer_params = conn.params_for("VALUES (%s, %s, 'assistant'")
+    assert answer_params[10] == 36
     assert tutor.calls[0]["lecture_id"] == 7
     assert conn.params_for("next_message_order = next_message_order + 2") == (SESSION_ID,)
     assert conn.params_for("role = 'user' AND idempotency_key") == (
@@ -269,7 +277,8 @@ def test_rolling_summary_updates_checkpoint_atomically():
             return GeneratedReply(
                 parsed=prompts.ConversationSummaryReply(
                     summary="Discussed pneumatic bones; pronoun it refers to maxilla."
-                ), model_name="gemini-test")
+                ), model_name="gemini-test", input_tokens=20,
+                output_tokens=5, total_tokens=25)
 
     tutor = SummaryTutor()
     settings = SimpleNamespace(
@@ -283,5 +292,6 @@ def test_rolling_summary_updates_checkpoint_atomically():
     params = conn.params_for("summarized_until_message_order = %s")
     assert params[0].startswith("Discussed pneumatic bones")
     assert params[3] == 2  # four newest messages remain verbatim
-    assert params[5] == 0  # compare-and-set prevents duplicate summarization
+    assert params[10] == 0  # compare-and-set prevents duplicate summarization
+    assert params[6:9] == (20, 5, 25)
     assert "old summary" in tutor.calls[0]["user_prompt"]
