@@ -17,6 +17,25 @@ class Counter:
         total = self.count_text(system).count
         total += sum(self.count_text(text).count + 4 for _, text in messages)
         return CountedTokens(total, self.tokenizer_name)
+    def count_messages(self, messages, system_instruction=""):
+        return self.count_complete_prompt(system_instruction, messages)
+
+
+class RecordingCounter(Counter):
+    def __init__(self, exact_counts=None):
+        self.exact_counts = list(exact_counts or [])
+        self.complete_calls = []
+
+    def count_complete_prompt(self, system, messages):
+        self.complete_calls.append((system, list(messages)))
+        if self.exact_counts:
+            return CountedTokens(
+                self.exact_counts.pop(0), "google-api:gemini-test", estimated=False
+            )
+        return super().count_complete_prompt(system, messages)
+
+    def count_messages(self, messages, system_instruction=""):
+        return Counter.count_complete_prompt(self, system_instruction, messages)
 
 
 class Model:
@@ -35,18 +54,21 @@ def settings(**overrides):
     values = dict(
         chat_model="gemini-test", chat_rewrite_history_tokens=100,
         chat_rewrite_max_output_tokens=160, chat_retrieval_candidate_limit=30,
-        chat_transcript_tokens=200, chat_answer_history_tokens=100,
+        chat_answer_history_tokens=100,
         chat_max_output_tokens=1200, chat_max_input_tokens=12000,
         llm_context_window=20000, chat_safety_margin_tokens=500,
+        chat_prompt_resize_max_attempts=8,
         embed_model="embed-test", embed_dim=3,
     )
     values.update(overrides)
     return SimpleNamespace(**values)
 
 
-def generated(parsed, model="gemini-test", input_tokens=10, output_tokens=3):
+def generated(parsed, model="gemini-test", input_tokens=10, output_tokens=3,
+              total_tokens=13):
     return GeneratedReply(parsed=parsed, model_name=model,
-                          input_tokens=input_tokens, output_tokens=output_tokens)
+                          input_tokens=input_tokens, output_tokens=output_tokens,
+                          total_tokens=total_tokens)
 
 
 @pytest.fixture
@@ -147,6 +169,7 @@ def test_provider_usage_is_kept_separate_for_rewrite_and_answer(rag):
         None, "Why?", lecture_id=7)
     assert (result.rewrite_input_tokens, result.rewrite_output_tokens) == (7, 2)
     assert (result.input_tokens, result.output_tokens) == (30, 5)
+    assert (result.rewrite_total_tokens, result.total_tokens) == (13, 13)
 
 
 def test_four_turn_pneumatic_bones_scenario_stays_grounded(monkeypatch):
@@ -198,3 +221,75 @@ def test_four_turn_pneumatic_bones_scenario_stays_grounded(monkeypatch):
     assert [item for item in retrieval_calls if item[0] == "lecture"] == [
         ("lecture", 7)
     ] * 4
+
+
+def test_oversized_exact_prompt_is_reduced_counted_again_then_generated(rag):
+    counter = RecordingCounter([13000, 11000])
+    model = Model([
+        generated(prompts.StandaloneQueryReply(standalone_query="Why X?")),
+        generated(prompts.TutorReply(
+            found=True, answer="Because [1]", used_excerpts=[1]
+        )),
+    ])
+    result = TutorService(
+        SimpleNamespace(), model, settings(), counter
+    ).ask(None, "Why?", lecture_id=7, summary="old rolling summary")
+
+    assert result.grounded is True
+    assert result.prompt_token_count == 11000
+    assert len(counter.complete_calls) == 2
+    assert "old rolling summary" in counter.complete_calls[0][1][-1][1]
+    assert "old rolling summary" not in counter.complete_calls[1][1][-1][1]
+    assert len(model.calls) == 2  # rewrite, then answer only after exact fit
+
+
+def test_dynamic_transcript_can_exceed_6000_but_does_not_insert_every_chunk(
+    monkeypatch,
+):
+    passages = [
+        Passage(index, 7, "Anatomy", f"relevant-{index} " + "bone " * 990,
+                index * 10, index * 10 + 5, .2)
+        for index in range(1, 21)
+    ]
+    monkeypatch.setattr(
+        "app.services.tutor.query_cache.embed_query",
+        lambda *args, **kwargs: [0, 0, 0],
+    )
+    lecture_scopes = []
+    monkeypatch.setattr(
+        "app.services.tutor.retrieval.search",
+        lambda conn, embedding, top_k, lecture_id: (
+            lecture_scopes.append(lecture_id) or passages
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.tutor.retrieval.by_chunk_ids", lambda *args, **kwargs: []
+    )
+    counter = RecordingCounter()
+    model = Model([
+        generated(prompts.StandaloneQueryReply(standalone_query="bones")),
+        generated(prompts.TutorReply(
+            found=True, answer="Grounded [1]", used_excerpts=[1]
+        )),
+    ])
+    dynamic_settings = settings(
+        chat_max_input_tokens=11000,
+        llm_context_window=13000,
+        chat_max_output_tokens=1200,
+        chat_safety_margin_tokens=500,
+        chat_retrieval_candidate_limit=30,
+    )
+    result = TutorService(
+        SimpleNamespace(), model, dynamic_settings, counter
+    ).ask(None, "Explain bones", lecture_id=7)
+
+    final_prompt = counter.complete_calls[-1][1][-1][1]
+    included = sum(f"relevant-{index}" in final_prompt for index in range(1, 21))
+    evidence_estimate = sum(
+        counter.count_text(passage.text).count + 16
+        for passage in passages[:included]
+    )
+    assert evidence_estimate > 6000
+    assert included < len(passages)
+    assert result.prompt_token_count <= 11000
+    assert lecture_scopes == [7]
