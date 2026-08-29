@@ -1,18 +1,20 @@
-"""Lecture listing and video streaming.
+"""Lecture listing and authenticated local/Bunny video playback."""
 
-The video is served whole, with byte-range support, so the browser can seek
-straight to a segment's start second instead of downloading from zero.
-"""
-
+import logging
 from pathlib import Path
 
+import requests
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
 from app.api.deps import get_conn, get_current_user, get_current_user_streaming
 from app.config import get_settings
 from app.schemas.lectures import Lecture
 from app.services import subscriptions
+from rag import bunny
+
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(
@@ -27,6 +29,7 @@ LIST_SQL = """
         l.title,
         l.doctor_id,
         l.video_url,
+        l.bunny_video_id,
         COUNT(c.id) AS chunk_count,
         COALESCE(MAX(c.end_ts), 0) AS duration_ts
     FROM lectures AS l
@@ -57,7 +60,8 @@ def resolve_video_path(video_url):
 
 def to_lecture(row):
 
-    lecture_id, title, doctor_id, video_url, chunk_count, duration_ts = row
+    (lecture_id, title, doctor_id, video_url, bunny_video_id,
+     chunk_count, duration_ts) = row
 
     return Lecture(
         id=lecture_id,
@@ -66,7 +70,7 @@ def to_lecture(row):
         video_url=f"/api/lectures/{lecture_id}/video",
         chunk_count=chunk_count,
         duration_ts=duration_ts,
-        has_video=resolve_video_path(video_url) is not None,
+        has_video=bool(bunny_video_id) or resolve_video_path(video_url) is not None,
     )
 
 
@@ -109,7 +113,7 @@ def stream_video(
     conn=Depends(get_conn),
     current_user=Depends(get_current_user_streaming),
 ):
-    """Full video file. FileResponse handles Range requests, so seeking works.
+    """Authorize playback, then use Bunny or the legacy local-file fallback.
 
     Behind the paywall: watching needs a subscription to the lecture's teacher,
     and the viewer is now the authenticated user rather than a `student_id` the
@@ -120,7 +124,9 @@ def stream_video(
     accepts the token as a query parameter, because a <video> element issues its
     own request and cannot be given an Authorization header. Set
     ENFORCE_SUBSCRIPTIONS=false to turn the paywall off in development; the
-    login requirement stays either way.
+    login requirement stays either way. Bunny-hosted lectures redirect to the
+    highest encoded rendition so the CDN, rather than this API process, serves
+    range requests and video bytes.
     """
 
     student_id = current_user["id"]
@@ -145,7 +151,7 @@ def stream_video(
     with conn.cursor() as cur:
 
         cur.execute(
-            "SELECT video_url FROM lectures WHERE id = %s",
+            "SELECT video_url, bunny_video_id FROM lectures WHERE id = %s",
             (lecture_id,),
         )
 
@@ -154,7 +160,48 @@ def stream_video(
     if row is None:
         raise HTTPException(status_code=404, detail="Lecture not found")
 
-    path = resolve_video_path(row[0])
+    video_url = row[0]
+    # Keep compatibility with older test doubles while the real SELECT always
+    # returns both columns.
+    bunny_video_id = row[1] if len(row) > 1 else None
+
+    if bunny_video_id:
+        try:
+            video = bunny.get_video(bunny_video_id)
+            if not bunny.is_finished(video):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "video_not_ready",
+                        "message": "الفيديو لسه بيتجهز على Bunny، جرّب تاني بعد شوية.",
+                        "bunny_status": bunny.status_name(video),
+                    },
+                )
+            playback_url = bunny.rendition_url(video, prefer="highest")
+        except HTTPException:
+            raise
+        except (bunny.BunnyError, requests.RequestException, RuntimeError) as error:
+            logger.error(
+                "Bunny playback lookup failed lecture=%s video=%s: %s",
+                lecture_id,
+                bunny_video_id,
+                error,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="تعذر تحميل الفيديو من Bunny دلوقتي. جرّب تاني بعد شوية.",
+            ) from error
+
+        return RedirectResponse(
+            playback_url,
+            status_code=307,
+            headers={
+                "Cache-Control": "private, no-store",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
+
+    path = resolve_video_path(video_url)
 
     if path is None:
         raise HTTPException(
