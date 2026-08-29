@@ -250,11 +250,23 @@ using the local `data/videos` fallback.
 ## Run
 
 ```bash
-uvicorn app.main:app --reload
+ENABLE_DEMO_UI=true uvicorn app.main:app --reload
 ```
 
-- `http://localhost:8000/` — demo UI
-- `http://localhost:8000/docs` — OpenAPI
+The demo UI is disabled by default. Set `ENABLE_DEMO_UI=true` only for local
+development. Without it, `/` and `/static` are not registered; the API,
+`/docs`, and `/health` remain available.
+
+```text
+http://localhost:8000/       demo UI (only when explicitly enabled)
+http://localhost:8000/docs   OpenAPI
+```
+
+To run the API without the demo UI:
+
+```bash
+uvicorn app.main:app --reload
+```
 
 All endpoints below require `Authorization: Bearer <supabase access token>`;
 only `/health` and the login route are public.
