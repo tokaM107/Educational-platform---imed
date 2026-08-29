@@ -91,6 +91,7 @@ class StoredChatMessage(BaseModel):
     prompt_version: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    total_tokens: int | None = None
     status: Literal["pending", "completed", "failed"]
     failure_code: str | None = None
     grounded: bool | None = None
@@ -100,6 +101,7 @@ class StoredChatMessage(BaseModel):
 class TokenUsage(BaseModel):
     input_tokens: int | None = None
     output_tokens: int | None = None
+    total_tokens: int | None = None
     assembled_prompt_tokens: int | None = None
     tokenizer_name: str
     estimated: bool = False
