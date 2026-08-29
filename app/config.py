@@ -151,6 +151,14 @@ class Settings:
             not in ("0", "false", "no", "off")
         )
 
+        # The static browser client is a local-development convenience.  It is
+        # deliberately opt-in so an API-only deployment neither publishes the
+        # demo routes nor depends on the static directory being present.
+        self.enable_demo_ui = (
+            os.getenv("ENABLE_DEMO_UI", "false").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
+
         # --- Weekly report ---
 
         # A week is seven *local* days. In UTC, a 23:00 Cairo session lands on
