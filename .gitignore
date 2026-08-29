@@ -231,3 +231,7 @@ data/videos/
 local_backup.sql
 supabase_restore.sql
 *.dump
+
+# Local Supabase CLI state and the separate database source repository.
+/supabase/.temp/
+/way2APlus_db/
