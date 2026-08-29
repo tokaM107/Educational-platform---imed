@@ -30,8 +30,16 @@ import argparse
 import sys
 
 import pgvector.sqlalchemy  # noqa: F401  (registers the `vector` column type)
+from pgvector.sqlalchemy import VECTOR
 from sqlacodegen.generators import DeclarativeGenerator
 from sqlalchemy import Engine, MetaData, create_engine
+from sqlalchemy.dialects.postgresql.base import ischema_names
+
+
+# Hosted Supabase installs pgvector in the ``extensions`` schema. PostgreSQL
+# reflection returns that qualified type name, while pgvector registers only
+# the unqualified ``vector`` name by default.
+ischema_names.setdefault("extensions.vector", VECTOR)
 
 
 HEADER = """\
