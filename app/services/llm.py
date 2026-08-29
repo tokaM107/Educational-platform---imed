@@ -33,6 +33,7 @@ class GeneratedReply:
     model_name: str
     input_tokens: int | None = None
     output_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 class ChatModel:
@@ -49,7 +50,7 @@ class ChatModel:
         )
 
     def generate(self, system_instruction, user_prompt, response_schema, history=None,
-                 max_output_tokens=2048):
+                 max_output_tokens=2048, allow_fallback=True):
         """One grounded reply, validated against `response_schema`.
 
         `history` is [(role, text), ...] oldest first.
@@ -66,6 +67,7 @@ class ChatModel:
             response_schema=response_schema,
             history=history,
             max_output_tokens=max_output_tokens,
+            allow_fallback=allow_fallback,
         ).parsed
 
     def generate_with_metadata(
@@ -75,6 +77,7 @@ class ChatModel:
         response_schema,
         history=None,
         max_output_tokens=2048,
+        allow_fallback=True,
     ):
         contents = self._build_contents(user_prompt, history)
 
@@ -90,7 +93,8 @@ class ChatModel:
 
         models = [self.settings.chat_model]
 
-        if self.settings.chat_fallback_model != self.settings.chat_model:
+        if (allow_fallback
+                and self.settings.chat_fallback_model != self.settings.chat_model):
             models.append(self.settings.chat_fallback_model)
 
         last_error = None
@@ -123,6 +127,11 @@ class ChatModel:
                         output_tokens=(
                             int(usage.candidates_token_count)
                             if usage and usage.candidates_token_count is not None
+                            else None
+                        ),
+                        total_tokens=(
+                            int(usage.total_token_count)
+                            if usage and usage.total_token_count is not None
                             else None
                         ),
                     )
