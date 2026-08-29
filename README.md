@@ -241,7 +241,11 @@ ready yet" into a 404 from ffmpeg.
 Re-running replaces that lecture's chunks instead of duplicating them.
 `lectures.bunny_video_id` holds the Bunny GUID; `lectures.video_url` still names
 the local file a lecture was ingested from, and lectures move to Bunny one at a
-time rather than all at once.
+time rather than all at once. The authenticated `/api/lectures/{id}/video`
+endpoint prefers `bunny_video_id`, verifies that Bunny finished encoding, then
+redirects the browser to the highest available MP4 rendition (or the HLS
+playlist when MP4 fallback is unavailable). Lectures without a Bunny GUID keep
+using the local `data/videos` fallback.
 
 ## Run
 
@@ -650,12 +654,41 @@ Conversational RAG budgets are configurable with `LLM_CONTEXT_WINDOW`,
 `CHAT_MAX_INPUT_TOKENS`, `CHAT_MAX_OUTPUT_TOKENS`,
 `CHAT_SAFETY_MARGIN_TOKENS`, `CHAT_REWRITE_HISTORY_TOKENS`,
 `CHAT_ANSWER_HISTORY_TOKENS`, `CHAT_SUMMARY_TOKENS`,
-`CHAT_TRANSCRIPT_TOKENS`, `CHAT_MAX_STUDENT_MESSAGE_TOKENS`,
+`CHAT_MAX_STUDENT_MESSAGE_TOKENS`,
 `CHAT_SUMMARY_UPDATE_THRESHOLD`, `CHAT_REWRITE_MAX_OUTPUT_TOKENS`,
 `CHAT_SUMMARY_MAX_OUTPUT_TOKENS`, `CHAT_HISTORY_LOAD_LIMIT`,
-`CHAT_RETRIEVAL_CANDIDATE_LIMIT`, and `CHAT_LLM_TIMEOUT_SECONDS`.
+`CHAT_RETRIEVAL_CANDIDATE_LIMIT`, `CHAT_LLM_TIMEOUT_SECONDS`,
+`CHAT_PROMPT_RESIZE_MAX_ATTEMPTS`, `CHAT_TOKEN_COUNT_RETRY_ATTEMPTS`, and
+`CHAT_TOKEN_COUNT_RETRY_DELAY_SECONDS`.
 The defaults cap input at 12,000 tokens and output at 1,200 tokens while still
 checking the configured model context window before every final generation.
+
+`CHAT_TRANSCRIPT_TOKENS` was removed: transcript evidence no longer has a hidden
+6,000-token ceiling. Ranked, relevant, lecture-scoped chunks use whatever remains
+inside `min(CHAT_MAX_INPUT_TOKENS, LLM_CONTEXT_WINDOW - output - safety margin)`
+after the required instructions, latest question, bounded memory and provider
+formatting. Dynamic means "the safe remaining product capacity", not unlimited
+context and not the entire transcript. Raising `CHAT_MAX_INPUT_TOKENS` can improve
+evidence coverage, but also increases latency and input-token cost.
+
+Chat budgeting never imports `google.genai.local_tokenizer`, Transformers, Gemma,
+Torch or Torchvision. Individual messages and candidate chunks use a deliberately
+conservative, dependency-free UTF-8 estimate for provisional selection, stored as
+`estimate:utf8-bytes-div-2:v1:for:<model>`. That value is explicitly estimated and
+never substitutes for final validation. Immediately before answer generation, the
+complete assembled conversation is sent to Gemini's official `count_tokens` using
+the configured `CHAT_MODEL`. If it is too large, a bounded resize loop removes the
+old summary, oldest complete turns, continuity-only chunks, then the lowest-ranked
+fresh evidence, rebuilding and recounting every time. If exact provider validation
+cannot be completed after transient retries, generation fails closed with a
+controlled 503; an unvalidated oversized prompt is never sent.
+
+Provider usage is stored separately: rewrite usage on the user `chat_messages`
+row, answer usage on the assistant row, and latest rolling-summary usage on
+`chat_sessions`. `input_tokens`, `output_tokens`, and `total_tokens` come from
+Gemini `usage_metadata` when available; provisional `token_count` retains its
+estimator name. See [the Arabic monthly AI cost estimate](docs/AI_MONTHLY_COST_ESTIMATE_AR.md)
+for editable small/medium/large scenarios and current pricing sources.
 
 ## Tests
 
