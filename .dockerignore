@@ -1,0 +1,52 @@
+# Version control and local tooling
+.git
+.github
+.gitignore
+.DS_Store
+**/.DS_Store
+.idea
+.vscode
+
+# Secrets and local Python environments
+.env
+.env.*
+!.env.example
+.venv
+venv
+env
+ENV
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage*
+htmlcov
+
+# Tests, documentation, database sources, and local data
+tests
+docs
+db
+data
+scripts
+app/static
+local_backup.sql
+supabase_restore.sql
+*.sql
+*.dump
+transcripts
+
+# Supabase CLI state and local/nested repositories
+supabase
+supabase/.temp
+way2APlus_db
+**/.git
+
+# Offline RAG/ML pipeline: retain only the Bunny HTTP helper used by the API.
+rag/*
+!rag/__init__.py
+!rag/bunny.py
+
+# Editor/search experiments not used by the runtime search endpoint.
+search-assistant/__pycache__
