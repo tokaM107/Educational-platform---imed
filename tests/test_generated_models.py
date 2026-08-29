@@ -105,8 +105,12 @@ def test_chat_memory_schema_metadata_is_reflected():
             "summarized_until_message_order", "next_message_order"} <= set(sessions.keys())
     assert {"message_order", "token_count", "tokenizer_name", "model_name",
             "prompt_version", "input_tokens", "output_tokens", "grounded",
+            "total_tokens",
             "status", "failure_code", "idempotency_key",
             "reply_to_message_id"} <= set(messages.keys())
+    assert {"summary_model_name", "summary_prompt_version",
+            "summary_input_tokens", "summary_output_tokens",
+            "summary_total_tokens"} <= set(sessions.keys())
     index_names = {index.name for index in models.ChatMessages.__table__.indexes}
     assert "uq_chat_messages_session_order" in index_names
     assert "uq_chat_messages_user_idempotency" in index_names
