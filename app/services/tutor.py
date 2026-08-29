@@ -10,7 +10,10 @@ from app.services import prompts, query_cache, retrieval
 from app.services.chat_memory import MemoryMessage, select_passages, select_recent_turns
 from app.services.embeddings import Embedder
 from app.services.llm import ChatModel, GeneratedReply, LLMUnavailable
-from app.services.token_budget import PromptTooLarge, ProviderTokenCounter, validate_prompt_size
+from app.services.token_budget import (
+    PromptTooLarge, ProviderTokenCounter, effective_input_limit,
+    validate_prompt_size,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -28,12 +31,14 @@ class TutorAnswer:
     prompt_version: str = prompts.ANSWER_PROMPT_VERSION
     input_tokens: int | None = None
     output_tokens: int | None = None
+    total_tokens: int | None = None
     prompt_token_count: int | None = None
     prompt_tokenizer_name: str | None = None
     prompt_tokens_estimated: bool = False
     rewrite_model_name: str | None = None
     rewrite_input_tokens: int | None = None
     rewrite_output_tokens: int | None = None
+    rewrite_total_tokens: int | None = None
 
 
 class TutorService:
@@ -44,7 +49,13 @@ class TutorService:
         self.embedder = embedder or Embedder(self.settings)
         self.chat_model = chat_model or ChatModel(self.settings)
         self.token_counter = token_counter or ProviderTokenCounter(
-            self.settings.chat_model, getattr(self.chat_model, "client", None)
+            self.settings.chat_model, getattr(self.chat_model, "client", None),
+            retry_attempts=getattr(
+                self.settings, "chat_token_count_retry_attempts", 2
+            ),
+            retry_delay_seconds=getattr(
+                self.settings, "chat_token_count_retry_delay_seconds", 0.25
+            ),
         )
 
     def _generate(self, **kwargs) -> GeneratedReply:
@@ -109,22 +120,19 @@ class TutorService:
         continuity = retrieval.by_chunk_ids(
             conn, list(continuity_chunk_ids or [])[:3], lecture_id
         )
-        passages = select_passages(
-            candidates + continuity,
-            self.settings.chat_transcript_tokens,
-            self.token_counter,
-        )
         rewrite_input = rewrite_usage.input_tokens if rewrite_usage else None
         rewrite_output = rewrite_usage.output_tokens if rewrite_usage else None
         rewrite_model = rewrite_usage.model_name if rewrite_usage else None
+        rewrite_total = rewrite_usage.total_tokens if rewrite_usage else None
 
-        if not passages:
+        if not candidates and not continuity:
             return TutorAnswer(
                 answer=prompts.NOT_IN_LECTURE, grounded=False,
                 standalone_query=standalone,
                 rewrite_model_name=rewrite_model,
                 rewrite_input_tokens=rewrite_input,
                 rewrite_output_tokens=rewrite_output,
+                rewrite_total_tokens=rewrite_total,
             )
 
         bounded_history = select_recent_turns(
@@ -134,8 +142,69 @@ class TutorService:
         )
         history_pairs = [(message.role, message.content) for message in bounded_history]
         active_summary = summary
+        # There is no transcript-only ceiling. Start with the safe product/model
+        # input capacity, subtract conservative estimates for everything that
+        # is not evidence, then let ranked relevant transcript chunks consume
+        # all remaining room. Exact provider validation below is authoritative.
+        sources = candidates + continuity
 
-        while True:
+        def provisionally_select():
+            empty_prompt = prompts.build_conversational_prompt(
+                question, standalone, [], active_summary
+            )
+            provisional_base = self.token_counter.count_messages(
+                history_pairs + [("user", empty_prompt)],
+                prompts.SYSTEM_INSTRUCTION,
+            ).count
+            transcript_allowance = max(
+                0, effective_input_limit(self.settings) - provisional_base
+            )
+            return select_passages(
+                sources, transcript_allowance, self.token_counter
+            )
+
+        passages = provisionally_select()
+        fresh_ids = {passage.chunk_id for passage in candidates}
+        selected_fresh_ids = {
+            passage.chunk_id for passage in passages
+            if passage.chunk_id in fresh_ids
+        }
+        # If relevant fresh retrieval is being excluded by memory, evidence
+        # wins. Recompute after dropping the summary, then oldest complete
+        # turns, matching the production priority contract.
+        while len(selected_fresh_ids) < len(fresh_ids):
+            if active_summary:
+                active_summary = ""
+            elif history_pairs:
+                remove = 2 if (
+                    len(history_pairs) >= 2
+                    and history_pairs[0][0] == "user"
+                    and history_pairs[1][0] == "assistant"
+                ) else 1
+                history_pairs = history_pairs[remove:]
+            else:
+                break
+            passages = provisionally_select()
+            selected_fresh_ids = {
+                passage.chunk_id for passage in passages
+                if passage.chunk_id in fresh_ids
+            }
+        if not passages:
+            return TutorAnswer(
+                answer=prompts.NOT_IN_LECTURE, grounded=False,
+                standalone_query=standalone,
+                rewrite_model_name=rewrite_model,
+                rewrite_input_tokens=rewrite_input,
+                rewrite_output_tokens=rewrite_output,
+                rewrite_total_tokens=rewrite_total,
+            )
+
+        max_resize_attempts = getattr(
+            self.settings, "chat_prompt_resize_max_attempts", 8
+        )
+        prompt_count = None
+        user_prompt = None
+        for resize_attempt in range(max_resize_attempts):
             user_prompt = prompts.build_conversational_prompt(
                 question, standalone, passages, active_summary
             )
@@ -149,14 +218,40 @@ class TutorService:
             except PromptTooLarge:
                 if active_summary:
                     active_summary = ""
-                elif len(history_pairs) >= 2:
-                    history_pairs = history_pairs[2:]
                 elif history_pairs:
-                    history_pairs = []
+                    # Remove exactly the oldest turn, never an assistant alone.
+                    remove = 2 if (
+                        len(history_pairs) >= 2
+                        and history_pairs[0][0] == "user"
+                        and history_pairs[1][0] == "assistant"
+                    ) else 1
+                    history_pairs = history_pairs[remove:]
+                elif any(item.chunk_id not in fresh_ids for item in passages):
+                    # Previous-answer continuity is lower priority than the new
+                    # lecture-scoped retrieval.
+                    for index in range(len(passages) - 1, -1, -1):
+                        if passages[index].chunk_id not in fresh_ids:
+                            passages.pop(index)
+                            break
                 elif len(passages) > 1:
+                    # Lowest-ranked fresh evidence is the final removable tier.
                     passages.pop()
                 else:
-                    raise
+                    return TutorAnswer(
+                        answer=prompts.NOT_IN_LECTURE, grounded=False,
+                        standalone_query=standalone,
+                        rewrite_model_name=rewrite_model,
+                        rewrite_input_tokens=rewrite_input,
+                        rewrite_output_tokens=rewrite_output,
+                        rewrite_total_tokens=rewrite_total,
+                        prompt_token_count=prompt_count.count,
+                        prompt_tokenizer_name=prompt_count.tokenizer_name,
+                        prompt_tokens_estimated=False,
+                    )
+        else:
+            raise PromptTooLarge(
+                f"prompt did not fit after {max_resize_attempts} resize attempts"
+            )
 
         try:
             generated = self._generate(
@@ -165,6 +260,7 @@ class TutorService:
                 response_schema=prompts.TutorReply,
                 history=history_pairs,
                 max_output_tokens=self.settings.chat_max_output_tokens,
+                allow_fallback=False,
             )
             reply = generated.parsed
         except LLMUnavailable as error:
@@ -177,6 +273,7 @@ class TutorService:
                 rewrite_model_name=rewrite_model,
                 rewrite_input_tokens=rewrite_input,
                 rewrite_output_tokens=rewrite_output,
+                rewrite_total_tokens=rewrite_total,
                 prompt_token_count=prompt_count.count,
                 prompt_tokenizer_name=prompt_count.tokenizer_name,
                 prompt_tokens_estimated=prompt_count.estimated,
@@ -185,9 +282,11 @@ class TutorService:
         common = dict(
             standalone_query=standalone, model_name=generated.model_name,
             input_tokens=generated.input_tokens, output_tokens=generated.output_tokens,
+            total_tokens=generated.total_tokens,
             rewrite_model_name=rewrite_model,
             rewrite_input_tokens=rewrite_input,
             rewrite_output_tokens=rewrite_output,
+            rewrite_total_tokens=rewrite_total,
             prompt_token_count=prompt_count.count,
             prompt_tokenizer_name=prompt_count.tokenizer_name,
             prompt_tokens_estimated=prompt_count.estimated,
