@@ -48,6 +48,7 @@ Set these production controls explicitly:
 ENABLE_DEMO_UI=false
 ENABLE_GRADING_DEMO_UI=false
 ENFORCE_SUBSCRIPTIONS=true
+LLM_DAILY_QUERY_LIMIT=10
 LOG_LEVEL=INFO
 REPORT_TIMEZONE=Africa/Cairo
 ```
@@ -56,7 +57,11 @@ Use `.env.example` as the complete safe template. `JWT_SECRET`,
 `JWT_ALGORITHM`, `ACCESS_TOKEN_MINUTES`, `SUPABASE_DATABASE_URL`,
 `SUPABASE_JWKS_URL`, and `HF_TOKEN` are not consumed by this HTTP runtime.
 
-## Optional doctor grading evaluation UI
+Apply DB migration `20260901020000_add_llm_daily_usage.sql` before deploying
+this application revision. The quota fails closed when its table is missing,
+preventing unmetered provider calls.
+
+## Optional authenticated grading evaluation UI
 
 The production image contains only the grading page and the existing login/session
 assets it needs; the general demo frontend remains excluded. To publish the
@@ -69,11 +74,12 @@ ESSAY_CRITERIA_MODEL=<optional; defaults to CHAT_MODEL>
 ESSAY_EVALUATOR_MODEL=<optional; defaults to CHAT_MODEL>
 ```
 
-All `/api/grading-demo/*` routes require a verified Supabase session linked to a
-`public.users` row whose application role is `doctor`. Students receive 403 and
-anonymous requests receive 401. The browser page redirects anonymous users to the
-existing login flow. This remains an evaluation surface: it does not write exam
-submissions or grading results to the database.
+All `/api/grading-demo/*` routes use the same shared authentication dependency as
+the chat API: they require a verified Supabase session linked to a `public.users`
+row, but impose no grading-specific role check. Both students and doctors may
+call them after authentication; anonymous requests receive 401. The browser page
+redirects anonymous users to the existing login flow. This remains an evaluation
+surface: it does not write exam submissions or grading results to the database.
 
 The service described above is private by default and therefore has no browser
 URL. If faculty need browser access to `/grading-demo`, intentionally assign an
@@ -85,8 +91,7 @@ VPN, IP allowlisting, or an identity-aware proxy where available.
 After deployment, verify from a browser:
 
 1. `/grading-demo` redirects an anonymous user to `/static/login.html`.
-2. A student can sign in but receives a doctor-only error and API 403.
-3. A doctor can load the synthetic dataset and run one example.
+2. A student or doctor can sign in, load the synthetic dataset, and run one example.
 4. Setting `ENABLE_GRADING_DEMO_UI=false` and redeploying removes both the page
    and `/api/grading-demo/*` routes with 404 responses.
 
@@ -107,6 +112,12 @@ FASTAPI_BASE_URL=http://<verified-network-alias-or-container-name>:8000
 ```
 
 No domain, public IP, or host-mapped port is involved.
+
+For user-facing AI calls, NestJS must forward the caller's original
+`Authorization: Bearer <Supabase access token>` header unchanged. FastAPI then
+uses the same `get_current_user` verification as the chat API and applies the
+daily quota to the mapped `public.users.id`. Do not replace this with a caller-
+supplied user-id header; an identifier is not proof of authentication.
 
 ## Verify and view the service
 
