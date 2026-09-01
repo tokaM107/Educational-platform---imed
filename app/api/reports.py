@@ -13,9 +13,9 @@ and refuses rather than guesses.
 
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
-from app.api.deps import get_conn, get_current_user
+from app.api.deps import consume_llm_quota, get_conn, get_current_user
 from app.schemas.reports import ReportSubject, WeeklyReport
 from app.services import authz, report, report_store
 
@@ -87,6 +87,7 @@ def report_subjects(
 
 @router.get("/weekly", response_model=WeeklyReport)
 def weekly_report(
+    response: Response,
     student_id: int | None = None,
     course_id: int | None = None,
     week_start: date | None = None,
@@ -119,6 +120,9 @@ def weekly_report(
             status_code=403,
             detail="Not allowed to read this student's report",
         )
+
+    if narrative:
+        consume_llm_quota(response, current_user, conn, "report")
 
     result = report.build(
         conn,
