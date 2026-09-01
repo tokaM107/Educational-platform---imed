@@ -140,13 +140,4 @@ $("generate").addEventListener("click", generate);
 $("evaluate").addEventListener("click", evaluate);
 $("pipeline").addEventListener("click", pipeline);
 $("run-dataset").addEventListener("click", runDataset);
-if (requireSession()) {
-  if (currentUser()?.role === "doctor") {
-    init();
-  } else {
-    document.querySelectorAll("button").forEach((button) => {
-      button.disabled = true;
-    });
-    showError(new Error("This internal grading tool is restricted to doctors."));
-  }
-}
+if (requireSession()) init();
