@@ -93,10 +93,10 @@ def test_grading_demo_can_be_enabled_explicitly(tmp_path):
     application.dependency_overrides[deps.get_current_user] = lambda: {
         "id": 2, "role": "student"
     }
-    assert client.get("/api/grading-demo/dataset").status_code == 403
+    assert client.get("/api/grading-demo/dataset").status_code == 200
 
 
-def test_full_dataset_runs_are_cost_limited_per_doctor(tmp_path, monkeypatch):
+def test_full_dataset_runs_are_cost_limited_per_user(tmp_path, monkeypatch):
     for filename in (
         "grading-demo.html", "grading-demo.js", "grading-demo.css", "auth.js",
         "styles.css", "login.html", "login.js", "login.css",
@@ -117,6 +117,7 @@ def test_full_dataset_runs_are_cost_limited_per_doctor(tmp_path, monkeypatch):
         "id": 1, "role": "doctor"
     }
     application.dependency_overrides[grading_demo.get_grading_service] = object
+    application.dependency_overrides[deps.grading_dataset_llm_quota] = lambda: None
     client = TestClient(application)
 
     assert client.post("/api/grading-demo/evaluate-dataset").status_code == 200
