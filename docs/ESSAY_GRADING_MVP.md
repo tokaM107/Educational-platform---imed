@@ -51,12 +51,16 @@ Each unset model inherits `CHAT_MODEL`. Provider retry may use the existing
 `CHAT_FALLBACK_MODEL`. The dedicated demo flag defaults to false and controls
 both `/grading-demo` and every `/api/grading-demo/*` endpoint.
 
-When enabled, every grading API endpoint requires an authenticated application
-user with the `doctor` role. The page reuses the existing FastAPI/Supabase login,
+When enabled, every grading API endpoint uses the same shared
+`get_current_user` dependency as the chat API. Any authenticated application
+user may call it; there is no grading-specific role check or separate auth
+implementation. The page reuses the existing FastAPI/Supabase login,
 access-token, and refresh-token flow. Sensitive grading API responses carry
 `Cache-Control: no-store`. Inputs are bounded before any provider call, and the
-full 40-case dataset endpoint is limited to two starts per doctor per ten minutes
-per application worker.
+full 40-case dataset endpoint is limited to two starts per user per ten minutes
+per application worker. It also consumes the complete default daily LLM budget;
+normal grading calls share the same Postgres-backed 10-request UTC-day budget as
+chat, search, and generated reports.
 
 Start the API:
 
@@ -95,7 +99,8 @@ created or committed unless an output path is explicitly supplied.
   verification, NLI, embeddings, or extra model pass.
 - A review flag identifies uncertainty but does not replace a doctor's judgment.
 - The in-process dataset rate limit is per worker and resets on deployment; use
-  a proxy or shared limiter if the tool is exposed beyond a controlled faculty group.
+  a proxy or shared limiter if the tool is exposed beyond a controlled faculty
+  group. The separate daily LLM budget is database-backed and cross-worker.
 
 Do not approve production use until predictions have been compared with blinded
 human grading, disagreements have been reviewed at criterion level, and acceptable
