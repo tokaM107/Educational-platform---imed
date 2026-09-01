@@ -183,13 +183,12 @@ class Settings:
         self.overlap_words = int(os.getenv("OVERLAP_WORDS", "25"))
 
         # --- Auth ---
-        #
-        # Nothing to configure here. Supabase issues and signs the tokens, and
-        # the settings that used to live here (JWT_SECRET, JWT_ALGORITHM,
-        # ACCESS_TOKEN_MINUTES) belonged to an application that minted its own —
-        # keeping them would suggest they still controlled something. Supabase's
-        # own configuration is read in app/services/supabase_client.py, and
-        # token lifetime is now a project setting in the Supabase dashboard.
+
+        # Nest signs user access tokens with this shared secret. It must be the
+        # exact value of JWT_ACCESS_SECRET in the Nest deployment and must never
+        # be exposed to a browser. Supabase verification keeps using that
+        # project's public JWKS through app/services/supabase_client.py.
+        self.nest_jwt_access_secret = env("NEST_JWT_ACCESS_SECRET", "")
 
         # --- Bunny Stream ---
         #
@@ -221,6 +220,16 @@ class Settings:
             raise RuntimeError("GEMINI_API_KEY is not set (see .env)")
 
         return self.gemini_api_key
+
+    def require_nest_jwt_access_secret(self):
+
+        if not self.nest_jwt_access_secret:
+            raise RuntimeError("NEST_JWT_ACCESS_SECRET is not set (see .env)")
+
+        if len(self.nest_jwt_access_secret) < 32:
+            raise RuntimeError("NEST_JWT_ACCESS_SECRET must be at least 32 characters")
+
+        return self.nest_jwt_access_secret
 
     def require_bunny(self):
         """(library_id, api_key, cdn_hostname), or a refusal naming what is missing.

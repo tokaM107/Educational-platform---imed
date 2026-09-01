@@ -33,6 +33,8 @@ Required for import/startup:
 - `DATABASE_URL`
 - `SUPABASE_URL`
 - `SUPABASE_PUBLISHABLE_KEY`
+- `NEST_JWT_ACCESS_SECRET` — the exact value of the Nest application's
+  `JWT_ACCESS_SECRET`, at least 32 characters
 
 Required for the complete current feature set:
 
@@ -52,6 +54,13 @@ LLM_DAILY_QUERY_LIMIT=10
 LOG_LEVEL=INFO
 REPORT_TIMEZONE=Africa/Cairo
 ```
+
+`NEST_JWT_ACCESS_SECRET` is a server credential. Do not expose it to the
+browser, include it in build arguments, or print it in logs. Save it in both
+applications, then redeploy FastAPI so the new container receives it. Because
+HS256 is symmetric, FastAPI can mint Nest user tokens if this secret is
+compromised; asymmetric signing, with only the public verification key in
+FastAPI, is the recommended future migration.
 
 Use `.env.example` as the complete safe template. `JWT_SECRET`,
 `JWT_ALGORITHM`, `ACCESS_TOKEN_MINUTES`, `SUPABASE_DATABASE_URL`,

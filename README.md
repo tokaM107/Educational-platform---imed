@@ -37,7 +37,7 @@ app/                    FastAPI service
   schemas/              pydantic request/response models
   services/
     supabase_client.py  the publishable client, and the secret-key admin one
-    security.py         verifying a Supabase access token (no hashing, no minting)
+    security.py         verifying Supabase and Nest access tokens (never minting)
     authz.py            who may read whose data (ownership, not just role)
     embeddings.py       Gemini embeddings (batching, quota throttling)
     query_cache.py      question embeddings cached in Postgres
@@ -494,12 +494,12 @@ authentication before launch; today nothing stops a student calling it.
 
 ## Authentication
 
-Supabase Auth owns credentials — password hashing, sign-in, token issuance and
-expiry, refresh rotation, email verification and recovery. Nothing in this
-repository hashes, compares or signs anything; a second implementation of that
-would be one too many.
+Supabase Auth owns its credentials — password hashing, sign-in, token issuance
+and expiry, refresh rotation, email verification and recovery. The main NestJS
+application also issues user access tokens. FastAPI verifies both token types
+but never mints either one and never sees a password.
 
-What stays here is identity mapping and authorization:
+What stays here is verification, identity mapping and authorization:
 
 ```
 Supabase auth.users.id  (UUID, owns the password)
@@ -507,6 +507,10 @@ Supabase auth.users.id  (UUID, owns the password)
         |  users.auth_user_id
         v
 public.users.id         (INTEGER, what every domain table keys on)
+        ^
+        |  Nest access token sub
+        |
+Nest user identity      (positive integer, aud: user)
 ```
 
 The integer id is unchanged and all eleven foreign keys still point at it. The
@@ -514,17 +518,33 @@ UUID identifies the login; the integer identifies the person the rest of the
 schema knows about.
 
 A request arrives with `Authorization: Bearer <token>`. `decode_access_token`
-(`app/services/security.py`) verifies it against the project's ES256 public
-keys, fetched once from the JWKS endpoint and cached — so verification is local
-and costs no round trip. `get_current_user` (`app/api/deps.py`) then maps the
-token's `sub` onto a `public.users` row and returns it. Missing, invalid,
-expired, or valid-but-unlinked all come back **401**; a user who is who they say
-and still may not have the thing gets **403**.
+(`app/services/security.py`) selects one fixed verification contract from the
+JWT algorithm:
 
-**The application role is read from the database, never from the token.**
-Supabase puts a `role` claim in the JWT and it says `authenticated`, meaning a
-Postgres role. Reading that as the student/doctor role would flatten every user
-into the same permissions.
+- Supabase tokens must use `ES256` and continue through the project's cached
+  JWKS verifier. Their UUID `sub` maps to `public.users.auth_user_id`.
+- Nest tokens must use `HS256`, verify with `NEST_JWT_ACCESS_SECRET`, carry the
+  `user` audience, and include `sub`, `exp`, `aud`, `role`, and `email`. Only a
+  positive integer subject and the `student` or `doctor` role are accepted. The
+  integer `sub` maps directly to `public.users.id`; `admin` audience tokens are
+  rejected.
+
+Missing, malformed, expired, wrongly signed, wrong-audience, or valid-but-
+unlinked tokens all come back **401** with `WWW-Authenticate: Bearer`; details
+of signature and claim failures are not exposed. A verified user who is not
+allowed to perform an operation gets **403**.
+
+**The effective application role is always read from the database.** Supabase's
+`role` claim is a Postgres role and is ignored. A Nest token's signed role must
+match the current `public.users.role`; a mismatch is rejected with 401 so a
+token issued before a role change cannot keep stale privileges.
+
+`NEST_JWT_ACCESS_SECRET` is required and must be the exact value of Nest's
+`JWT_ACCESS_SECRET`, with at least 32 characters. Keep it server-only and never
+log it. Because HS256 is symmetric, a compromise of FastAPI would give an
+attacker enough key material to mint tokens that Nest trusts. Migrating the two
+services to asymmetric signing, where FastAPI holds only a public verification
+key, is the recommended long-term design.
 
 **FastAPI owns the session.** The browser talks only to this API and never to
 Supabase directly, so a session is created in one place and ended in one place.
@@ -726,11 +746,11 @@ python -m rag.eval_retrieval --with-answer
 ```
 
 `tests/test_auth.py` and `tests/test_security.py` cover authentication and
-authorization without touching Supabase or Postgres: token verification is
-stubbed at the one seam that matters, and `tests/fake_db.py` stands in for the
-connection so a test can assert on the queries that were actually run — which
-is how "the id came from the token, not the request body" is checked rather
-than assumed.
+authorization without touching Supabase or Postgres. Nest JWTs are signed and
+verified locally in the tests, Supabase's JWKS call is stubbed, and
+`tests/fake_db.py` stands in for the connection so a test can assert on the
+queries that were actually run — including whether the id came from the token
+rather than the request body.
 
 ## Notes and limits
 

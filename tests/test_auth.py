@@ -5,19 +5,22 @@ Two questions, and they fail differently:
     authentication   who is asking?          missing/bad/unlinked -> 401
     authorization    may they have this?     wrong person/role    -> 403
 
-Supabase is never called. Token verification is stubbed at
-`app.api.deps.decode_access_token`, which is the seam between "Supabase says
-this token is genuine" and everything this application does with that fact —
-the part worth testing. The database is stubbed too (tests/fake_db.py), so the
-recorded queries can be inspected directly.
+Token verification is usually stubbed at `app.api.deps.decode_access_token`,
+the seam between "an issuer proved this identity" and everything this
+application does with that fact. The database is stubbed too
+(`tests/fake_db.py`), so the recorded queries can be inspected directly.
 """
 
+from datetime import datetime, timedelta, timezone
+
+import jwt
 import pytest
 from fastapi.testclient import TestClient
 
 from app.api import deps
 from app.main import app
-from app.services.security import InvalidToken
+from app.services import security
+from app.services.security import InvalidToken, VerifiedIdentity
 from tests.fake_db import FakeConn
 
 
@@ -40,13 +43,18 @@ DOCTOR = {
 }
 
 AUTH = {"Authorization": "Bearer any-token-the-stub-accepts"}
+NEST_SECRET = "nest-test-access-secret-at-least-32-characters-and-long-enough"
 
 
 @pytest.fixture
 def client():
 
-    with TestClient(app) as test_client:
-        yield test_client
+    # These are request-layer tests with get_conn replaced by FakeConn. Avoid
+    # entering the production lifespan, whose job is to open a real DB pool.
+    test_client = TestClient(app)
+    app.dependency_overrides[deps.get_tutor] = lambda: object()
+    yield test_client
+    test_client.close()
 
     app.dependency_overrides.clear()
 
@@ -78,7 +86,11 @@ def as_user(user):
 def test_a_valid_token_resolves_to_the_linked_user(client, conn, monkeypatch):
 
     monkeypatch.setattr(
-        deps, "decode_access_token", lambda token: {"sub": STUDENT["auth_user_id"]}
+        deps,
+        "decode_access_token",
+        lambda token: VerifiedIdentity(
+            source="supabase", subject=STUDENT["auth_user_id"]
+        ),
     )
     conn.answer = lambda sql, params: [
         (2, "Ahmed", "student@example.com", "student", STUDENT["auth_user_id"])
@@ -125,9 +137,13 @@ def test_an_expired_token_is_401(client, conn, monkeypatch):
     assert client.get("/api/auth/me", headers=AUTH).status_code == 401
 
 
-def test_a_token_with_no_subject_is_401(client, conn, monkeypatch):
+def test_a_verified_identity_with_no_subject_is_401(client, conn, monkeypatch):
 
-    monkeypatch.setattr(deps, "decode_access_token", lambda token: {"sub": None})
+    monkeypatch.setattr(
+        deps,
+        "decode_access_token",
+        lambda token: VerifiedIdentity(source="supabase", subject=""),
+    )
 
     assert client.get("/api/auth/me", headers=AUTH).status_code == 401
 
@@ -143,7 +159,9 @@ def test_a_genuine_supabase_user_with_no_application_row_is_401(
     """
 
     monkeypatch.setattr(
-        deps, "decode_access_token", lambda token: {"sub": "unlinked-uuid"}
+        deps,
+        "decode_access_token",
+        lambda token: VerifiedIdentity(source="supabase", subject="unlinked-uuid"),
     )
     conn.answer = lambda sql, params: []
 
@@ -165,13 +183,119 @@ def test_the_application_role_is_read_from_the_database_not_the_token(
     monkeypatch.setattr(
         deps,
         "decode_access_token",
-        lambda token: {"sub": DOCTOR["auth_user_id"], "role": "authenticated"},
+        lambda token: VerifiedIdentity(
+            source="supabase", subject=DOCTOR["auth_user_id"]
+        ),
     )
     conn.answer = lambda sql, params: [
         (1, "Dr Selim", "doctor@example.com", "doctor", DOCTOR["auth_user_id"])
     ]
 
     assert client.get("/api/auth/me", headers=AUTH).json()["role"] == "doctor"
+
+
+@pytest.mark.parametrize("user", [STUDENT, DOCTOR])
+def test_a_valid_nest_token_resolves_by_integer_user_id(
+    client, conn, monkeypatch, user
+):
+
+    monkeypatch.setattr(
+        security.get_settings(), "nest_jwt_access_secret", NEST_SECRET
+    )
+    token = jwt.encode(
+        {
+            "sub": str(user["id"]),
+            "email": user["email"],
+            "role": user["role"],
+            "aud": "user",
+            "exp": datetime.now(timezone.utc) + timedelta(minutes=15),
+        },
+        NEST_SECRET,
+        algorithm="HS256",
+    )
+    conn.answer = lambda sql, params: [
+        (
+            user["id"],
+            user["name"],
+            user["email"],
+            user["role"],
+            user["auth_user_id"],
+        )
+    ]
+
+    response = client.get(
+        "/api/auth/me", headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == user["id"]
+    assert conn.params_for("users WHERE id = %s") == (user["id"],)
+
+
+def test_a_nest_token_is_refused_when_the_database_role_changed(
+    client, conn, monkeypatch
+):
+
+    monkeypatch.setattr(
+        deps,
+        "decode_access_token",
+        lambda token: VerifiedIdentity(source="nest", subject=2, role="doctor"),
+    )
+    conn.answer = lambda sql, params: [
+        (2, "Ahmed", "student@example.com", "student", None)
+    ]
+
+    response = client.get("/api/auth/me", headers=AUTH)
+
+    assert response.status_code == 401
+    assert response.headers.get("WWW-Authenticate") == "Bearer"
+
+
+def test_a_nest_token_for_a_nonexistent_user_is_401(client, conn, monkeypatch):
+
+    monkeypatch.setattr(
+        deps,
+        "decode_access_token",
+        lambda token: VerifiedIdentity(source="nest", subject=404, role="student"),
+    )
+    conn.answer = lambda sql, params: []
+
+    assert client.get("/api/auth/me", headers=AUTH).status_code == 401
+
+
+def test_a_valid_nest_student_token_reaches_tutor_sessions(
+    client, conn, monkeypatch
+):
+
+    monkeypatch.setattr(
+        security.get_settings(), "nest_jwt_access_secret", NEST_SECRET
+    )
+    token = jwt.encode(
+        {
+            "sub": str(STUDENT["id"]),
+            "email": STUDENT["email"],
+            "role": "student",
+            "aud": "user",
+            "exp": datetime.now(timezone.utc) + timedelta(minutes=15),
+        },
+        NEST_SECRET,
+        algorithm="HS256",
+    )
+
+    def answer(sql, params):
+        if "users WHERE id = %s" in sql:
+            return [(2, "Ahmed", "student@example.com", "student", None)]
+        return []
+
+    conn.answer = answer
+    response = client.get(
+        "/api/chat/sessions?lecture_id=7",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == []
+    assert conn.params_for("FROM chat_sessions")[:3] == (2, 7, 7)
 
 
 # -------------------------
@@ -455,7 +579,11 @@ def test_the_video_route_accepts_the_token_as_a_query_parameter(
     """
 
     monkeypatch.setattr(
-        deps, "decode_access_token", lambda token: {"sub": STUDENT["auth_user_id"]}
+        deps,
+        "decode_access_token",
+        lambda token: VerifiedIdentity(
+            source="supabase", subject=STUDENT["auth_user_id"]
+        ),
     )
 
     def answer(sql, params):
