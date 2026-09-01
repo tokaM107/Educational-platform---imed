@@ -1,0 +1,30 @@
+:root { color-scheme: light; font: 15px/1.5 system-ui, sans-serif; color: #17212b; background: #edf1f5; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { width: min(1180px, calc(100% - 32px)); margin: 32px auto 64px; }
+header { margin-bottom: 24px; }
+h1, h2 { margin: 0 0 8px; }
+.eyebrow { color: #376a5b; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+.panel { background: white; border: 1px solid #d9e0e6; border-radius: 12px; padding: 22px; margin: 18px 0; box-shadow: 0 3px 14px #12202f0d; }
+label { display: grid; gap: 6px; font-weight: 650; }
+textarea, input, select { width: 100%; border: 1px solid #b8c4ce; border-radius: 7px; padding: 10px; font: inherit; background: white; }
+textarea { resize: vertical; }
+.inputs { display: grid; gap: 16px; }
+.dataset-pickers { display: grid; grid-template-columns: 1fr 1fr auto; gap: 12px; align-items: end; }
+.points { width: 180px; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; }
+button { border: 0; border-radius: 7px; padding: 10px 14px; font: inherit; font-weight: 700; color: white; background: #176c58; cursor: pointer; }
+button.secondary { color: #1d3e36; background: #dcebe7; }
+button:disabled { opacity: .55; cursor: wait; }
+.error { background: #ffe8e5; color: #932c22; padding: 12px; border-radius: 7px; white-space: pre-wrap; }
+.empty { color: #66737e; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-bottom: 12px; }
+.badge { display: inline-block; padding: 3px 8px; border-radius: 99px; background: #f6d88a; color: #5b4200; font-weight: 700; }
+pre { overflow: auto; max-height: 340px; padding: 14px; border-radius: 7px; background: #f5f7f9; white-space: pre-wrap; word-break: break-word; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { padding: 8px; border-bottom: 1px solid #dfe5e9; text-align: left; vertical-align: top; }
+th { background: #f5f7f9; }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 18px; }
+.metric { padding: 10px; border-radius: 7px; background: #eef5f3; }
+.metric strong { display: block; font-size: 18px; }
+@media (max-width: 700px) { .dataset-pickers { grid-template-columns: 1fr; } .points { width: 100%; } }
