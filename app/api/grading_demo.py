@@ -4,7 +4,9 @@ from functools import lru_cache
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
-from app.api.deps import require_doctor
+from app.api.deps import (
+    get_current_user, grading_dataset_llm_quota, grading_llm_quota,
+)
 from app.schemas.essay_grading import (
     EvaluateAnswerRequest, GenerateCriteriaRequest, GradeRequest,
 )
@@ -21,7 +23,7 @@ router = APIRouter(
     prefix="/api/grading-demo",
     tags=["Grading demo"],
     dependencies=[
-        Depends(require_doctor),
+        Depends(get_current_user),
         Depends(prevent_sensitive_response_caching),
     ],
 )
@@ -41,6 +43,7 @@ def dataset():
 async def generate_criteria(
     data: GenerateCriteriaRequest,
     service=Depends(get_grading_service),
+    _quota=Depends(grading_llm_quota),
 ):
     try:
         result = await service.generate_criteria(data.question, data.model_answer)
@@ -53,6 +56,7 @@ async def generate_criteria(
 async def evaluate_answer(
     data: EvaluateAnswerRequest,
     service=Depends(get_grading_service),
+    _quota=Depends(grading_llm_quota),
 ):
     try:
         result = await service.evaluate_student_answer(
@@ -64,7 +68,11 @@ async def evaluate_answer(
 
 
 @router.post("/grade")
-async def grade(data: GradeRequest, service=Depends(get_grading_service)):
+async def grade(
+    data: GradeRequest,
+    service=Depends(get_grading_service),
+    _quota=Depends(grading_llm_quota),
+):
     return await service.grade(
         data.question, data.model_answer, data.student_answer, data.max_points
     )
@@ -73,7 +81,8 @@ async def grade(data: GradeRequest, service=Depends(get_grading_service)):
 @router.post("/evaluate-dataset")
 async def run_dataset(
     service=Depends(get_grading_service),
-    current_user=Depends(require_doctor),
+    current_user=Depends(get_current_user),
+    _quota=Depends(grading_dataset_llm_quota),
 ):
     try:
         rate_limit.check(
