@@ -257,6 +257,11 @@ The demo UI is disabled by default. Set `ENABLE_DEMO_UI=true` only for local
 development. Without it, `/` and `/static` are not registered; the API,
 `/docs`, and `/health` remain available.
 
+The isolated LLM-assisted essay grading evaluation prototype has its own opt-in
+flag and is documented in [docs/ESSAY_GRADING_MVP.md](docs/ESSAY_GRADING_MVP.md).
+Its proposed production database audit model is documented separately in
+[docs/ESSAY_GRADING_STORAGE_DESIGN.md](docs/ESSAY_GRADING_STORAGE_DESIGN.md).
+
 ```text
 http://localhost:8000/       demo UI (only when explicitly enabled)
 http://localhost:8000/docs   OpenAPI
@@ -293,6 +298,7 @@ only `/health` and the login route are public.
 | `GET /api/reports/{id}` | a report a completion produced, as it was issued |
 | `GET /api/exams` | the caller's own lectures that have questions (doctors) |
 | `GET /api/exams/{lecture_id}` | post-exam statistics for one lecture (its doctor only) |
+| `POST /api/grading-demo/grade` | opt-in two-stage essay evaluation prototype (doctors only) |
 | `POST /api/subscriptions` | subscribe the authenticated student to a teacher |
 | `GET /api/subscriptions/access` | may the caller watch this lecture? |
 | `GET /api/notifications` | the caller's inbox, with the unread count |
