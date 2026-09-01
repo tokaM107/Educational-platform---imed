@@ -120,7 +120,7 @@ register_demo_ui(app, settings)
 
 
 def register_grading_demo(application, app_settings):
-    """Publish the doctor-only grading API and its login-capable UI."""
+    """Publish the authenticated grading API and its login-capable UI."""
 
     if not app_settings.enable_grading_demo_ui:
         return False
