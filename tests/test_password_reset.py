@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api import auth as auth_api
+from app.api import deps
 from app.main import app
 from app.services import rate_limit
 
@@ -64,8 +65,13 @@ def clean_limits():
 
 @pytest.fixture
 def client():
-    with TestClient(app) as test_client:
-        yield test_client
+    # These routes do not use Postgres. Keep their unit tests independent of
+    # the production lifespan that opens the real application connection pool.
+    test_client = TestClient(app)
+    app.dependency_overrides[deps.get_conn] = lambda: object()
+    yield test_client
+    test_client.close()
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture
