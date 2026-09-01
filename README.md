@@ -298,7 +298,7 @@ only `/health` and the login route are public.
 | `GET /api/reports/{id}` | a report a completion produced, as it was issued |
 | `GET /api/exams` | the caller's own lectures that have questions (doctors) |
 | `GET /api/exams/{lecture_id}` | post-exam statistics for one lecture (its doctor only) |
-| `POST /api/grading-demo/grade` | opt-in two-stage essay evaluation prototype (doctors only) |
+| `POST /api/grading-demo/grade` | opt-in two-stage essay evaluation prototype (any authenticated user) |
 | `POST /api/subscriptions` | subscribe the authenticated student to a teacher |
 | `GET /api/subscriptions/access` | may the caller watch this lecture? |
 | `GET /api/notifications` | the caller's inbox, with the unread count |
@@ -578,6 +578,15 @@ The limiter is in-process, so the budget is per worker and a restart forgets it.
 That is enough to slow password guessing and to stop the reset form being used
 to send mail; it is not enough on its own at scale, where this belongs in Redis
 or at the proxy.
+
+LLM requests use a separate production limiter in
+`app/services/llm_quota.py`. Every authenticated user shares one budget across
+chat questions, contextual chat messages, smart search, generated report
+narratives, and essay grading. The default is 10 request units per UTC day and
+is configurable with `LLM_DAILY_QUERY_LIMIT`. Reservations are atomic rows in
+`llm_daily_usage`, so multiple workers and restarts cannot multiply or erase the
+budget. The response includes `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and
+`X-RateLimit-Reset`; an exhausted budget returns 429 with `Retry-After`.
 
 Authorization lives in `app/services/authz.py`, because a role is rarely the
 whole answer. Being a doctor is not permission to read every student on the
