@@ -46,6 +46,10 @@ class Settings:
         self.chat_model = os.getenv("CHAT_MODEL", "gemini-3.1-flash-lite")
         self.essay_criteria_model = env("ESSAY_CRITERIA_MODEL", self.chat_model)
         self.essay_evaluator_model = env("ESSAY_EVALUATOR_MODEL", self.chat_model)
+        self.llm_daily_query_limit = int(env("LLM_DAILY_QUERY_LIMIT", "10"))
+
+        if self.llm_daily_query_limit <= 0:
+            raise ValueError("LLM_DAILY_QUERY_LIMIT must be positive")
 
         # Used when the primary model answers 429/503. Newer flash models get
         # busy; an older one is usually free and good enough for restating a
