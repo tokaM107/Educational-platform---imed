@@ -11,7 +11,9 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from psycopg.types.json import Jsonb
 
-from app.api.deps import get_conn, get_current_user, get_tutor, require_student
+from app.api.deps import (
+    chat_llm_quota, get_conn, get_current_user, get_tutor, require_student,
+)
 from app.config import get_settings
 from app.schemas.chat import (
     ChatMessageCreate, ChatRequest, ChatResponse, ChatSession, ChatSessionCreate,
@@ -267,7 +269,8 @@ def create_chat_message(session_id: UUID, data: ChatMessageCreate,
                         idempotency_key: str = Header(..., alias="Idempotency-Key",
                                                       min_length=8, max_length=255),
                         conn=Depends(get_conn), tutor=Depends(get_tutor),
-                        current_user=Depends(require_student)):
+                        current_user=Depends(require_student),
+                        _quota=Depends(chat_llm_quota)):
     settings = get_settings()
     counter = getattr(tutor, "token_counter", None) or _default_counter()
     content_count = counter.count_text(data.content)
@@ -447,7 +450,8 @@ def create_chat_message(session_id: UUID, data: ChatMessageCreate,
 
 @router.post("/chat", response_model=ChatResponse)
 def chat(data: ChatRequest, conn=Depends(get_conn), tutor=Depends(get_tutor),
-         current_user=Depends(get_current_user)):
+         current_user=Depends(get_current_user),
+         _quota=Depends(chat_llm_quota)):
     try:
         result = tutor.ask(
             conn, question=data.message, lecture_id=data.lecture_id,
