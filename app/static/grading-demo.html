@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Essay grading evaluation</title>
+  <link rel="stylesheet" href="/grading-demo.css">
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">Internal engineering prototype</p>
+      <h1>LLM-assisted essay grading</h1>
+      <p>This tool is synthetic and experimental. Scores require doctor review before academic use.</p>
+    </header>
+
+    <section class="panel inputs">
+      <div class="dataset-pickers">
+        <label>Dataset question<select id="question-select"></select></label>
+        <label>Student case<select id="case-select"></select></label>
+        <button id="load-example" class="secondary">Load Example</button>
+      </div>
+      <label>Question<textarea id="question" rows="3"></textarea></label>
+      <label>Model answer<textarea id="model-answer" rows="5"></textarea></label>
+      <label>Student answer<textarea id="student-answer" rows="5"></textarea></label>
+      <label class="points">Maximum points<input id="max-points" type="number" min="0.01" step="0.01" value="4.00"></label>
+      <div class="actions">
+        <button id="generate">Generate Criteria</button>
+        <button id="evaluate">Grade Answer</button>
+        <button id="pipeline">Run Full Pipeline</button>
+        <button id="run-dataset" class="secondary">Run All Dataset Cases</button>
+      </div>
+      <p id="status" role="status"></p>
+      <div id="error" class="error" role="alert" hidden></div>
+    </section>
+
+    <section class="panel" id="criteria-section">
+      <h2>Criteria Generator</h2><div id="criteria-output" class="empty">No run yet.</div>
+    </section>
+    <section class="panel" id="evaluator-section">
+      <h2>Answer Evaluator</h2><div id="evaluator-output" class="empty">No run yet.</div>
+    </section>
+    <section class="panel" id="score-section">
+      <h2>Deterministic Score</h2><div id="score-output" class="empty">Run the full pipeline to calculate a backend score.</div>
+    </section>
+    <section class="panel" id="dataset-section">
+      <h2>Dataset Evaluation Summary</h2><div id="dataset-output" class="empty">No dataset run yet.</div>
+    </section>
+  </main>
+  <script src="/static/auth.js"></script>
+  <script src="/grading-demo.js"></script>
+</body>
+</html>
