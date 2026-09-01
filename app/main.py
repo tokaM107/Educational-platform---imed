@@ -117,3 +117,56 @@ def register_demo_ui(application, app_settings):
 
 
 register_demo_ui(app, settings)
+
+
+def register_grading_demo(application, app_settings):
+    """Publish the doctor-only grading API and its login-capable UI."""
+
+    if not app_settings.enable_grading_demo_ui:
+        return False
+
+    assets = {
+        "/grading-demo": "grading-demo.html",
+        "/grading-demo.js": "grading-demo.js",
+        "/grading-demo.css": "grading-demo.css",
+        "/static/auth.js": "auth.js",
+        "/static/styles.css": "styles.css",
+        "/static/login.html": "login.html",
+        "/static/login.js": "login.js",
+        "/static/login.css": "login.css",
+    }
+    missing = [
+        filename for filename in assets.values()
+        if not (app_settings.static_dir / filename).is_file()
+    ]
+    if missing:
+        logging.getLogger(__name__).warning(
+            "ENABLE_GRADING_DEMO_UI is true but assets are missing (%s); "
+            "grading demo disabled",
+            ", ".join(missing),
+        )
+        return False
+
+    from fastapi.responses import FileResponse
+    from app.api import grading_demo
+
+    application.include_router(grading_demo.router)
+
+    def asset_endpoint(filename):
+        def serve_asset():
+            return FileResponse(app_settings.static_dir / filename)
+        return serve_asset
+
+    for path, filename in assets.items():
+        application.add_api_route(
+            path,
+            asset_endpoint(filename),
+            methods=["GET"],
+            include_in_schema=False,
+            name=f"grading_demo_asset_{filename.replace('.', '_')}",
+        )
+
+    return True
+
+
+register_grading_demo(app, settings)
