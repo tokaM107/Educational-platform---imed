@@ -318,7 +318,8 @@ def test_a_student_cannot_read_another_students_report(client, conn):
     as_user(STUDENT)
 
     response = client.get(
-        f"/api/reports/weekly?student_id={OTHER_STUDENT_ID}", headers=AUTH
+        f"/api/reports/weekly?student_id={OTHER_STUDENT_ID}&narrative=false",
+        headers=AUTH,
     )
 
     assert response.status_code == 403
@@ -363,7 +364,8 @@ def test_a_doctor_cannot_read_a_student_they_do_not_teach(client, conn):
     conn.answer = lambda sql, params: []          # the teaches() lookup misses
 
     response = client.get(
-        f"/api/reports/weekly?student_id={OTHER_STUDENT_ID}", headers=AUTH
+        f"/api/reports/weekly?student_id={OTHER_STUDENT_ID}&narrative=false",
+        headers=AUTH,
     )
 
     assert response.status_code == 403
