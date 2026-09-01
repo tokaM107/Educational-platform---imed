@@ -28,10 +28,15 @@ So: read these files. Do not run them.
 | a new `db/migrations/0NN_*.sql` | `supabase migration new <name>` there |
 | checking a change landed by hand | the `live schema drift` CI job, nightly |
 
-## The two files that are not history
+## Files that are not migration history
 
 `verify_catalog.sql` and `verify_test_data.sql` are read-only queries for
 checking the contents of a database, not its shape. They still work and are
 still worth running. `ERD.md` and `erd.svg` are a hand-drawn picture of the
 schema; they were already only as current as the last person to redraw them,
 and the drift report is the honest account of what is actually there.
+
+`proposals/` contains reviewed SQL handoffs for changes that must ultimately be
+created and applied in `educational-platform-db`. A proposal is not an executable
+migration from this repository; its README states the upstream coordination and
+verification required before use.
