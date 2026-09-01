@@ -30,7 +30,18 @@ docs
 db
 data
 scripts
-app/static
+# Production normally has no demo frontend. Keep only the authenticated essay
+# grading page and the existing login/session assets it needs when its dedicated
+# feature flag is enabled; the general student demo remains outside the image.
+app/static/*
+!app/static/grading-demo.html
+!app/static/grading-demo.js
+!app/static/grading-demo.css
+!app/static/auth.js
+!app/static/styles.css
+!app/static/login.html
+!app/static/login.js
+!app/static/login.css
 local_backup.sql
 supabase_restore.sql
 *.sql
