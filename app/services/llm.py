@@ -34,6 +34,9 @@ class GeneratedReply:
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    raw_response: str | None = None
+    retry_count: int = 0
+    retry_errors: tuple[str, ...] = ()
 
 
 class ChatModel:
@@ -50,7 +53,8 @@ class ChatModel:
         )
 
     def generate(self, system_instruction, user_prompt, response_schema, history=None,
-                 max_output_tokens=2048, allow_fallback=True):
+                 max_output_tokens=2048, allow_fallback=True, model_name=None,
+                 temperature=0.2):
         """One grounded reply, validated against `response_schema`.
 
         `history` is [(role, text), ...] oldest first.
@@ -68,6 +72,8 @@ class ChatModel:
             history=history,
             max_output_tokens=max_output_tokens,
             allow_fallback=allow_fallback,
+            model_name=model_name,
+            temperature=temperature,
         ).parsed
 
     def generate_with_metadata(
@@ -78,6 +84,8 @@ class ChatModel:
         history=None,
         max_output_tokens=2048,
         allow_fallback=True,
+        model_name=None,
+        temperature=0.2,
     ):
         contents = self._build_contents(user_prompt, history)
 
@@ -85,19 +93,21 @@ class ChatModel:
             system_instruction=system_instruction,
             # Low temperature: the job is to restate the lecture, not to be
             # creative with it.
-            temperature=0.2,
+            temperature=temperature,
             max_output_tokens=max_output_tokens,
             response_mime_type="application/json",
             response_schema=response_schema,
         )
 
-        models = [self.settings.chat_model]
+        primary_model = model_name or self.settings.chat_model
+        models = [primary_model]
 
         if (allow_fallback
-                and self.settings.chat_fallback_model != self.settings.chat_model):
+                and self.settings.chat_fallback_model != primary_model):
             models.append(self.settings.chat_fallback_model)
 
         last_error = None
+        retry_errors = []
 
         for model in models:
 
@@ -134,6 +144,9 @@ class ChatModel:
                             if usage and usage.total_token_count is not None
                             else None
                         ),
+                        raw_response=getattr(response, "text", None),
+                        retry_count=len(retry_errors),
+                        retry_errors=tuple(retry_errors),
                     )
 
                 except (errors.APIError, httpx.TimeoutException) as error:
@@ -141,6 +154,9 @@ class ChatModel:
                     last_error = error
 
                     code = getattr(error, "code", None)
+                    retry_errors.append(
+                        f"{model}:{code if code is not None else 'timeout'}"
+                    )
                     if code is not None and code not in RETRYABLE:
                         raise
 
