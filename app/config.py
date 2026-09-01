@@ -44,6 +44,8 @@ class Settings:
         self.embed_model = os.getenv("EMBED_MODEL", "gemini-embedding-2")
         self.embed_dim = int(os.getenv("EMBED_DIM", "1536"))
         self.chat_model = os.getenv("CHAT_MODEL", "gemini-3.1-flash-lite")
+        self.essay_criteria_model = env("ESSAY_CRITERIA_MODEL", self.chat_model)
+        self.essay_evaluator_model = env("ESSAY_EVALUATOR_MODEL", self.chat_model)
 
         # Used when the primary model answers 429/503. Newer flash models get
         # busy; an older one is usually free and good enough for restating a
@@ -156,6 +158,10 @@ class Settings:
         # demo routes nor depends on the static directory being present.
         self.enable_demo_ui = (
             os.getenv("ENABLE_DEMO_UI", "false").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
+        self.enable_grading_demo_ui = (
+            os.getenv("ENABLE_GRADING_DEMO_UI", "false").strip().lower()
             in ("1", "true", "yes", "on")
         )
 
