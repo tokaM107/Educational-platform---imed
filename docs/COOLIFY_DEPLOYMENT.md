@@ -46,6 +46,7 @@ Set these production controls explicitly:
 
 ```text
 ENABLE_DEMO_UI=false
+ENABLE_GRADING_DEMO_UI=false
 ENFORCE_SUBSCRIPTIONS=true
 LOG_LEVEL=INFO
 REPORT_TIMEZONE=Africa/Cairo
@@ -54,6 +55,40 @@ REPORT_TIMEZONE=Africa/Cairo
 Use `.env.example` as the complete safe template. `JWT_SECRET`,
 `JWT_ALGORITHM`, `ACCESS_TOKEN_MINUTES`, `SUPABASE_DATABASE_URL`,
 `SUPABASE_JWKS_URL`, and `HF_TOKEN` are not consumed by this HTTP runtime.
+
+## Optional doctor grading evaluation UI
+
+The production image contains only the grading page and the existing login/session
+assets it needs; the general demo frontend remains excluded. To publish the
+isolated grading evaluation tool, set:
+
+```text
+ENABLE_DEMO_UI=false
+ENABLE_GRADING_DEMO_UI=true
+ESSAY_CRITERIA_MODEL=<optional; defaults to CHAT_MODEL>
+ESSAY_EVALUATOR_MODEL=<optional; defaults to CHAT_MODEL>
+```
+
+All `/api/grading-demo/*` routes require a verified Supabase session linked to a
+`public.users` row whose application role is `doctor`. Students receive 403 and
+anonymous requests receive 401. The browser page redirects anonymous users to the
+existing login flow. This remains an evaluation surface: it does not write exam
+submissions or grading results to the database.
+
+The service described above is private by default and therefore has no browser
+URL. If faculty need browser access to `/grading-demo`, intentionally assign an
+HTTPS domain or a protected reverse-proxy route in Coolify. Do not publish port
+8000 directly. Keep TLS enabled, preserve `Authorization` headers, and do not put
+a cache/CDN in front of grading API responses. Restrict the domain further with
+VPN, IP allowlisting, or an identity-aware proxy where available.
+
+After deployment, verify from a browser:
+
+1. `/grading-demo` redirects an anonymous user to `/static/login.html`.
+2. A student can sign in but receives a doctor-only error and API 403.
+3. A doctor can load the synthetic dataset and run one example.
+4. Setting `ENABLE_GRADING_DEMO_UI=false` and redeploying removes both the page
+   and `/api/grading-demo/*` routes with 404 responses.
 
 ## Private connection from NestJS
 
