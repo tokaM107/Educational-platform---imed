@@ -2,10 +2,13 @@
 
 from functools import lru_cache
 
-from fastapi import Depends, HTTPException, Query
+from fastapi import Depends, HTTPException, Query, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from psycopg import Error as DatabaseError
 
+from app.config import get_settings
 from app.db import connection
+from app.services import llm_quota
 from app.services.security import InvalidToken, decode_access_token
 from app.services.tutor import TutorService
 
@@ -163,6 +166,77 @@ def require_role(*roles):
 # to the CHECK constraint first if that changes.
 require_student = require_role("student")
 require_doctor = require_role("doctor")
+
+
+def _quota_headers(usage):
+    return {
+        "X-RateLimit-Limit": str(usage.limit),
+        "X-RateLimit-Remaining": str(usage.remaining),
+        "X-RateLimit-Reset": str(usage.retry_after),
+    }
+
+
+def consume_llm_quota(response, current_user, conn, feature, *, units=1):
+    """Reserve quota and translate the service result into HTTP semantics."""
+
+    try:
+        usage = llm_quota.consume(
+            conn,
+            current_user["id"],
+            feature,
+            limit=get_settings().llm_daily_query_limit,
+            units=units,
+        )
+    except llm_quota.QuotaExceeded as error:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "daily_llm_limit_reached",
+                "message": "Daily AI question limit reached. Try again tomorrow.",
+                "limit": error.usage.limit,
+                "used": error.usage.used,
+            },
+            headers={
+                **_quota_headers(error.usage),
+                "Retry-After": str(error.usage.retry_after),
+            },
+        ) from error
+    except DatabaseError as error:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "llm_quota_unavailable",
+                "message": "AI requests are temporarily unavailable.",
+            },
+        ) from error
+
+    for name, value in _quota_headers(usage).items():
+        response.headers[name] = value
+    return usage
+
+
+def llm_quota_dependency(feature, *, units=1):
+    """Build a quota dependency layered on the shared authenticated identity."""
+
+    def dependency(
+        response: Response,
+        current_user=Depends(get_current_user),
+        conn=Depends(get_conn),
+    ):
+        effective_units = (
+            get_settings().llm_daily_query_limit if units is None else units
+        )
+        return consume_llm_quota(
+            response, current_user, conn, feature, units=effective_units
+        )
+
+    return dependency
+
+
+chat_llm_quota = llm_quota_dependency("chat")
+search_llm_quota = llm_quota_dependency("search")
+grading_llm_quota = llm_quota_dependency("grading")
+grading_dataset_llm_quota = llm_quota_dependency("grading_dataset", units=None)
 
 
 @lru_cache
