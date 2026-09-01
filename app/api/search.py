@@ -16,7 +16,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends
 
-from app.api.deps import get_conn, get_current_user
+from app.api.deps import get_conn, get_current_user, search_llm_quota
 from app.schemas.search import SearchRequest, SearchResponse
 
 
@@ -53,6 +53,7 @@ def smart_search(
     data: SearchRequest,
     conn=Depends(get_conn),
     current_user=Depends(get_current_user),
+    _quota=Depends(search_llm_quota),
 ):
     """Read the question, run the catalog search, say where to go.
 
