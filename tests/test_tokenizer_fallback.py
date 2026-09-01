@@ -118,6 +118,7 @@ def test_api_chat_never_imports_or_contacts_huggingface_for_counting(monkeypatch
         "id": 2, "role": "student"
     }
     application.dependency_overrides[deps.get_tutor] = lambda: tutor
+    application.dependency_overrides[deps.chat_llm_quota] = lambda: None
 
     response = TestClient(application).post(
         "/api/chat",
@@ -179,6 +180,7 @@ def test_exact_count_failure_returns_controlled_503(monkeypatch):
         "id": 2, "role": "student"
     }
     application.dependency_overrides[deps.get_tutor] = lambda: tutor
+    application.dependency_overrides[deps.chat_llm_quota] = lambda: None
 
     response = TestClient(application, raise_server_exceptions=False).post(
         "/api/chat", json={"message": "What are pneumatic bones?", "lecture_id": 1}
