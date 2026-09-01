@@ -63,6 +63,7 @@ def client_for(api, conn, user=STUDENT, tutor=None):
     api.dependency_overrides[deps.get_conn] = lambda: conn
     api.dependency_overrides[deps.get_current_user] = lambda: user
     api.dependency_overrides[deps.get_tutor] = lambda: tutor or FakeTutor()
+    api.dependency_overrides[deps.chat_llm_quota] = lambda: None
     return TestClient(api)
 
 
