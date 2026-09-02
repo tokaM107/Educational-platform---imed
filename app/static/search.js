@@ -8,10 +8,6 @@
  * no doctor filter at all, and only the third layer tells them apart.
  */
 
-if (!requireSession()) {
-  throw new Error("not signed in");
-}
-
 const form = document.getElementById("ask");
 const input = document.getElementById("query");
 const send = document.getElementById("send");
@@ -29,19 +25,8 @@ const clarifyInput = document.getElementById("clarify-input");
 // instead of starting a new one. Cleared whenever a fresh query is typed.
 let history = [];
 
-// What following the link actually lands on. Only lectures have a page of
-// their own; everything else resolves to a lecture inside it.
-const OPENS = {
-  lecture: "افتح المحاضرة",
-  course: "أول محاضرة",
-  module: "أول محاضرة",
-  subject: "محاضرة في المادة",
-  doctor: "محاضرة للدكتور",
-  student: "محاضرة",
-};
-
 const WORDS = {
-  go: ["فيه نتيجة واحدة", "اتنقل عليها على طول"],
+  go: ["فيه نتيجة واحدة", "دي النتيجة المطابقة"],
   choose: ["فيه أكتر من نتيجة", "الطالب هو اللي يختار"],
   none: ["مفيش نتايج", "الكاتالوج مفهوش حاجة بالمواصفات دي"],
   clarify: ["محتاج توضيح", "السؤال مفهوش حاجة نبحث بيها"],
@@ -57,17 +42,19 @@ async function run(query, extraHistory) {
 
   try {
 
-    const response = await api("/api/search", {
+    const response = await fetch("/api/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query, history: extraHistory || [] }),
     });
 
+    const payload = await response.json();
     if (!response.ok) {
-      throw new Error(`الخادم رجّع ${response.status}`);
+      const detail = payload.detail || {};
+      throw new Error(detail.message || `الخادم رجّع ${response.status}`);
     }
 
-    show(await response.json(), query);
+    show(payload, query);
 
   } catch (error) {
     show({
@@ -141,19 +128,21 @@ function hit(row) {
 
   const meta = el("div", "meta");
 
-  // The year rides on the course title rather than standing as its own chip:
-  // a lone Arabic run between English ones gets reordered to the far end of the
-  // line, where it reads as belonging to nothing.
-  const course = row.course
-    && row.course.title + (row.course.academic_year ? ` (Y${row.course.academic_year})` : "");
+  const category = row.category
+    && (row.category.name_ar || row.category.name_en);
+  const level = row.educational_level
+    && (row.educational_level.name_ar || row.educational_level.name_en);
 
   const bits = [
+    `ID: ${row.id}`,
     row.doctor && row.doctor.name,
-    course,
-    row.module && row.module.title,
-    row.subject,
-    row.lectures !== undefined && `${row.lectures} lectures`,
-    row.modules !== undefined && `${row.modules} modules`,
+    category,
+    level,
+    row.academic_year && `السنة ${row.academic_year}`,
+    row.language,
+    row.courses !== undefined && `${row.courses} كورس`,
+    row.books !== undefined && `${row.books} كتاب`,
+    row.categories !== undefined && `${row.categories} قسم`,
   ].filter(Boolean);
 
   bits.forEach((bit) => meta.append(el("span", "", bit)));
@@ -162,10 +151,8 @@ function hit(row) {
 
   node.append(el("span", "badge", row.kind), body);
 
-  // Short label, full explanation on hover. `url_opens` is written for whoever
-  // consumes the API and is too long to sit beside a title without shoving it.
   const label = el("span", live ? "go" : "go off",
-    live ? (OPENS[row.kind] || "افتح") : "مفيش صفحة");
+    live ? "افتح" : "نتيجة");
 
   if (row.url_opens) label.title = row.url_opens;
 
@@ -284,7 +271,7 @@ clarifyForm.addEventListener("submit", (event) => {
 
 // Sample chips come from search-assistant/cases.py — the same ten rows the
 // grading script runs, so clicking one reproduces exactly what it tests.
-api("/api/search/cases")
+fetch("/api/search/cases")
   .then((response) => response.json())
   .then((cases) => {
 
