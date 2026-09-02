@@ -54,8 +54,8 @@ def message_row(message_id, order, role, content, *, standalone=None, citations=
 def api(monkeypatch):
     application = FastAPI()
     application.include_router(chat.router)
-    monkeypatch.setattr(chat.subscriptions, "can_watch",
-                        lambda conn, student_id, lecture_id: (True, 1, "Anatomy"))
+    monkeypatch.setattr(chat.subscriptions, "can_watch_video",
+                        lambda conn, student_id, video_id: (True, 1, "Anatomy"))
     return application
 
 
@@ -72,10 +72,10 @@ def test_student_creates_session_from_jwt_identity(api):
         (SESSION_ID, STUDENT["id"], 7, NOW, NOW, 0)
     ] if "INSERT INTO chat_sessions" in sql else [])
     response = client_for(api, conn).post(
-        "/api/chat/sessions", json={"lecture_id": 7})
+        "/api/chat/sessions", json={"video_id": 7})
     assert response.status_code == 201
     assert response.json()["student_id"] == STUDENT["id"]
-    assert response.json()["lecture_id"] == 7
+    assert response.json()["video_id"] == 7
     assert "title" not in response.json()
     assert conn.params_for("INSERT INTO chat_sessions") == (2, 7)
     assert conn.committed == 1
@@ -83,36 +83,36 @@ def test_student_creates_session_from_jwt_identity(api):
 
 def test_session_body_rejects_title(api):
     response = client_for(api, FakeConn()).post(
-        "/api/chat/sessions", json={"lecture_id": 7, "title": "Revision"})
+        "/api/chat/sessions", json={"video_id": 7, "title": "Revision"})
     assert response.status_code == 422
 
 
 def test_session_body_rejects_caller_supplied_user_id(api):
     response = client_for(api, FakeConn()).post(
-        "/api/chat/sessions", json={"user_id": 99, "lecture_id": 7})
+        "/api/chat/sessions", json={"user_id": 99, "video_id": 7})
     assert response.status_code == 422
 
 
 def test_doctor_cannot_create_student_session(api):
     response = client_for(api, FakeConn(), user=DOCTOR).post(
-        "/api/chat/sessions", json={"lecture_id": 7})
+        "/api/chat/sessions", json={"video_id": 7})
     assert response.status_code == 403
 
 
-def test_inaccessible_lecture_is_rejected(api, monkeypatch):
-    monkeypatch.setattr(chat.subscriptions, "can_watch",
+def test_inaccessible_video_is_rejected(api, monkeypatch):
+    monkeypatch.setattr(chat.subscriptions, "can_watch_video",
                         lambda *args: (False, 1, "Private"))
     response = client_for(api, FakeConn()).post(
-        "/api/chat/sessions", json={"lecture_id": 7})
+        "/api/chat/sessions", json={"video_id": 7})
     assert response.status_code == 402
 
 
-def test_sessions_are_paginated_and_scoped_to_student_and_lecture(api):
+def test_sessions_are_paginated_and_scoped_to_student_and_video(api):
     conn = FakeConn(lambda sql, params: [
         (SESSION_ID, 2, 7, NOW, NOW, 0)
     ] if "FROM chat_sessions" in sql else [])
     response = client_for(api, conn).get(
-        "/api/chat/sessions?lecture_id=7&limit=10&offset=20")
+        "/api/chat/sessions?video_id=7&limit=10&offset=20")
     assert response.status_code == 200
     assert "title" not in response.json()[0]
     assert conn.params_for("ORDER BY updated_at") == (2, 7, 7, 10, 20)
@@ -120,7 +120,7 @@ def test_sessions_are_paginated_and_scoped_to_student_and_lecture(api):
 
 def test_messages_use_stable_order_and_pagination(api):
     def answer(sql, params):
-        if "SELECT lecture_id FROM chat_sessions" in sql:
+        if "SELECT video_id FROM chat_sessions" in sql:
             return [(7,)]
         if "FROM chat_messages" in sql:
             return [message_row(11, 1, "user", "First"),
@@ -141,9 +141,9 @@ def test_other_students_session_is_not_exposed(api):
 
 
 def test_post_message_persists_standalone_query_citations_and_usage(api):
-    passage = SimpleNamespace(chunk_id=9, lecture_id=7, start_ts=10, end_ts=20,
+    passage = SimpleNamespace(chunk_id=9, video_id=7, start_ts=10, end_ts=20,
                               text="source", distance=0.23456)
-    segment = SimpleNamespace(lecture_id=7, lecture_title="Anatomy",
+    segment = SimpleNamespace(video_id=7, video_title="Anatomy",
                               start_ts=10, end_ts=20)
     tutor = FakeTutor(TutorAnswer(
         answer="Radius", grounded=True,
@@ -158,7 +158,7 @@ def test_post_message_persists_standalone_query_citations_and_usage(api):
     user_done = message_row(21, 1, "user", "What is it?",
                             standalone="What did the lecturer call it?",
                             total_tokens=11)
-    citation = {"index": 1, "chunk_id": 9, "lecture_id": 7, "start_ts": 10,
+    citation = {"index": 1, "chunk_id": 9, "video_id": 7, "start_ts": 10,
                 "end_ts": 20, "text": "source", "distance": 0.2346}
     assistant = message_row(22, 2, "assistant", "Radius", citations=[citation],
                             reply_grounded=True, total_tokens=36)
@@ -194,7 +194,7 @@ def test_post_message_persists_standalone_query_citations_and_usage(api):
     assert rewrite_params[5] == 11
     answer_params = conn.params_for("VALUES (%s, %s, 'assistant'")
     assert answer_params[10] == 36
-    assert tutor.calls[0]["lecture_id"] == 7
+    assert tutor.calls[0]["video_id"] == 7
     assert conn.params_for("next_message_order = next_message_order + 2") == (SESSION_ID,)
     assert conn.params_for("role = 'user' AND idempotency_key") == (
         SESSION_ID, "request-0001")
