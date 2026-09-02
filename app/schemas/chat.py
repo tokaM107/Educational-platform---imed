@@ -57,14 +57,12 @@ class ChatSessionCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     lecture_id: int
-    title: str | None = Field(default=None, max_length=255)
 
 
 class ChatSession(BaseModel):
     id: UUID
     student_id: int
     lecture_id: int
-    title: str | None
     created_at: datetime
     updated_at: datetime
     summary_token_count: int = 0
