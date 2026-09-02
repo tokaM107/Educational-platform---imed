@@ -15,6 +15,10 @@ class FakeCursor:
     def fetchone(self):
         return self.rows.pop(0) if self.rows else None
 
+    def fetchall(self):
+        rows, self.rows = self.rows, []
+        return rows
+
     def __enter__(self):
         return self
 
@@ -97,6 +101,48 @@ def test_a_non_video_course_item_is_not_accepted_as_a_video():
     )
 
     assert (allowed, doctor_id, title) == (False, None, None)
+
+
+def test_subscriber_can_search_every_video_in_the_same_course():
+    conn = FakeConn([
+        (7, False, 16),
+        (True,),
+        (11,),
+        (12,),
+    ])
+
+    video_ids = subscriptions.accessible_course_video_ids(
+        conn, student_id=3, video_id=11, enforce_subscriptions=True
+    )
+
+    assert video_ids == [11, 12]
+    assert conn._cursor.sql[-1][1] == (16, True)
+
+
+def test_preview_user_can_search_preview_videos_but_not_paid_siblings():
+    conn = FakeConn([
+        (7, True, 16),
+        (False,),
+        (11,),
+    ])
+
+    video_ids = subscriptions.accessible_course_video_ids(
+        conn, student_id=3, video_id=11, enforce_subscriptions=True
+    )
+
+    assert video_ids == [11]
+    assert conn._cursor.sql[-1][1] == (16, False)
+
+
+def test_paid_video_without_subscription_has_no_transcript_scope():
+    video_ids = subscriptions.accessible_course_video_ids(
+        FakeConn([(7, False, 16), (False,)]),
+        student_id=3,
+        video_id=11,
+        enforce_subscriptions=True,
+    )
+
+    assert video_ids == []
 
 
 def test_an_anonymous_viewer_has_no_access():
