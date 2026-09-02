@@ -172,22 +172,18 @@ front of a lecture, and from questions they actually answered. A student who has
 not watched anything gets a report that says exactly that, which is the truth and
 more useful than an invented week.
 
-## Ingest a lecture
+## Ingest a course video
 
-Videos live in a **Bunny Stream** library, not on disk. The pipeline uploads a
-lecture once, remembers its Bunny id, and from then on reads the audio straight
-off the CDN — so re-transcribing needs nothing local, and neither does
-transcribing a lecture somebody else uploaded.
+Videos live in a **Bunny Stream** library and are catalogued as `course_items`
+rows with `type = 'video'`. The pipeline reads the Bunny id from `video_ref` and
+never creates a duplicate row in the legacy `lectures` table.
 
 ```bash
-# 1. upload to Bunny (once) and transcribe
-python -m rag.transcribe --lecture-id 1 --video sample1.mp4
-
-# already on Bunny? give the id and nothing is uploaded
-python -m rag.transcribe --lecture-id 1 --bunny-video-id <guid>
+# 1. transcribe the existing Bunny-backed course video
+python -m rag.transcribe --video-id 11
 
 # stop after cutting the chunks, without loading the ASR model
-python -m rag.transcribe --lecture-id 1 --video sample1.mp4 --audio-only
+python -m rag.transcribe --video-id 11 --audio-only
 
 # what is in the library, and is it encoded yet?
 python -m rag.bunny list
@@ -195,10 +191,8 @@ python -m rag.bunny list --unfinished
 python -m rag.bunny show <guid>
 
 # 2. transcript -> chunks -> embeddings -> Postgres
-python -m rag.ingest --lecture-id 1 \
-    --title "Skeletal System" \
-    --transcript data/transcripts/lecture_1.txt \
-    --video sample1.mp4
+python -m rag.ingest --video-id 11 \
+    --transcript data/transcripts/video_11.txt
 
 python -m rag.ingest --dry-run     # chunking only: no API calls, no writes
 ```
@@ -287,12 +281,13 @@ their description says public. `/health` is also public.
 | `POST /api/search` | public, unlimited catalog-only AI search |
 | `GET /api/search/cases` | public search-assistant sample prompts |
 | `POST /api/chat` | question → grounded answer + video segments + citations |
-| `POST /api/chat/sessions` | create a thread from `lecture_id`; student identity comes from authentication |
-| `GET /api/chat/sessions` | paginate the caller's threads, optionally by lecture |
+| `POST /api/chat/sessions` | create a thread from a course-item `video_id`; student identity comes from authentication |
+| `GET /api/chat/sessions` | paginate the caller's threads, optionally by `video_id` |
 | `GET /api/chat/sessions/{session_id}/messages` | paginate the caller's stored messages in stable order |
 | `POST /api/chat/sessions/{session_id}/messages` | idempotently generate and persist a contextualized grounded turn |
 | `GET /api/lectures` | lectures with chunk count and duration |
 | `GET /api/lectures/{id}/video` | the whole video, with byte-range support so seeking works |
+| `GET /api/videos/{video_id}/video` | authenticated Bunny playback for a course-item video |
 | `POST /api/events` | record one video event (insert only, deliberately trivial) |
 | `GET /api/events/analytics` | watch time / time away / session length for a session |
 | `GET /api/reports/weekly` | a student's week on a course, with a generated narrative |
@@ -312,7 +307,7 @@ TOKEN=$(curl -s localhost:8000/api/auth/login -H 'Content-Type: application/json
 
 curl -s localhost:8000/api/chat \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
-  -d '{"message":"عظمة القعبرة اسمها ايه بالانجليزي وليه؟","lecture_id":1}'
+  -d '{"message":"عظمة القعبرة اسمها ايه بالانجليزي وليه؟","video_id":11}'
 ```
 
 ```jsonc
