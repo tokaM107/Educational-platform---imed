@@ -79,17 +79,17 @@ def rag(monkeypatch):
     monkeypatch.setattr("app.services.tutor.query_cache.embed_query",
                         lambda conn, embedder, question, commit=False:
                         calls.setdefault("query", question) or [0, 0, 0])
-    def search(conn, embedding, top_k, lecture_id):
-        calls["lecture_id"] = lecture_id
+    def search(conn, embedding, top_k, video_id):
+        calls["video_id"] = video_id
         calls["top_k"] = top_k
         return [passage]
     monkeypatch.setattr("app.services.tutor.retrieval.search", search)
     monkeypatch.setattr("app.services.tutor.retrieval.by_chunk_ids",
-                        lambda conn, ids, lecture_id: [])
+                        lambda conn, ids, video_id: [])
     return passage, calls
 
 
-def test_followup_is_rewritten_and_retrieval_stays_in_session_lecture(rag):
+def test_followup_is_rewritten_and_retrieval_stays_in_session_video(rag):
     model = Model([
         generated(prompts.StandaloneQueryReply(
             standalone_query="What example of pneumatic bones did the doctor mention?")),
@@ -98,12 +98,12 @@ def test_followup_is_rewritten_and_retrieval_stays_in_session_lecture(rag):
     ])
     tutor = TutorService(embedder=SimpleNamespace(), chat_model=model,
                          settings=settings(), token_counter=Counter())
-    result = tutor.ask(None, "What example did the doctor mention?", lecture_id=7,
+    result = tutor.ask(None, "What example did the doctor mention?", video_id=7,
                        history=[("user", "What are pneumatic bones?"),
                                 ("assistant", "They contain air spaces.")])
     assert result.standalone_query.startswith("What example of pneumatic bones")
     assert rag[1]["query"] == result.standalone_query
-    assert rag[1]["lecture_id"] == 7
+    assert rag[1]["video_id"] == 7
     assert result.segments[0].start_ts == 57
 
 
@@ -115,7 +115,7 @@ def test_already_standalone_question_is_left_unchanged(rag):
                                      used_excerpts=[1])),
     ])
     result = TutorService(SimpleNamespace(), model, settings(), Counter()).ask(
-        None, question, lecture_id=7)
+        None, question, video_id=7)
     assert result.standalone_query == question
 
 
@@ -127,7 +127,7 @@ def test_contextualizer_failure_falls_back_to_original_query(rag):
                                      used_excerpts=[1])),
     ])
     result = TutorService(SimpleNamespace(), model, settings(), Counter()).ask(
-        None, question, lecture_id=7)
+        None, question, video_id=7)
     assert result.standalone_query == question
     assert rag[1]["query"] == question
 
@@ -136,7 +136,7 @@ def test_missing_evidence_returns_safe_answer_without_answer_generation(rag, mon
     monkeypatch.setattr("app.services.tutor.retrieval.search", lambda *args, **kwargs: [])
     model = Model([generated(prompts.StandaloneQueryReply(standalone_query="Unknown"))])
     result = TutorService(SimpleNamespace(), model, settings(), Counter()).ask(
-        None, "Unknown", lecture_id=7)
+        None, "Unknown", video_id=7)
     assert result.grounded is False
     assert result.answer == prompts.NOT_IN_LECTURE
     assert len(model.calls) == 1
@@ -149,7 +149,7 @@ def test_summary_is_context_only_and_never_transcript_evidence(rag):
                                      used_excerpts=[1])),
     ])
     TutorService(SimpleNamespace(), model, settings(), Counter()).ask(
-        None, "Why?", lecture_id=7,
+        None, "Why?", video_id=7,
         summary="The previous assistant claimed an unsupported medical fact.")
     final_prompt = model.calls[1]["user_prompt"]
     assert "NEVER evidence" in final_prompt
@@ -166,7 +166,7 @@ def test_provider_usage_is_kept_separate_for_rewrite_and_answer(rag):
                   input_tokens=30, output_tokens=5),
     ])
     result = TutorService(SimpleNamespace(), model, settings(), Counter()).ask(
-        None, "Why?", lecture_id=7)
+        None, "Why?", video_id=7)
     assert (result.rewrite_input_tokens, result.rewrite_output_tokens) == (7, 2)
     assert (result.input_tokens, result.output_tokens) == (30, 5)
     assert (result.rewrite_total_tokens, result.total_tokens) == (13, 13)
@@ -201,16 +201,16 @@ def test_four_turn_pneumatic_bones_scenario_stays_grounded(monkeypatch):
                         lambda conn, embedder, query, commit=False:
                         retrieval_calls.append((query, commit)) or [0, 0, 0])
     monkeypatch.setattr("app.services.tutor.retrieval.search",
-                        lambda conn, embedding, top_k, lecture_id: (
-                            retrieval_calls.append(("lecture", lecture_id)) or [passage]
+                        lambda conn, embedding, top_k, video_id: (
+                            retrieval_calls.append(("video", video_id)) or [passage]
                         ))
     monkeypatch.setattr("app.services.tutor.retrieval.by_chunk_ids",
-                        lambda conn, ids, lecture_id: [])
+                        lambda conn, ids, video_id: [])
     tutor = TutorService(SimpleNamespace(), model, settings(), Counter())
     history = []
     results = []
     for question in questions:
-        result = tutor.ask(None, question, lecture_id=7, history=history)
+        result = tutor.ask(None, question, video_id=7, history=history)
         results.append(result)
         history.extend([("user", question), ("assistant", result.answer)])
 
@@ -218,8 +218,8 @@ def test_four_turn_pneumatic_bones_scenario_stays_grounded(monkeypatch):
     assert all(result.grounded for result in results)
     assert all(result.segments[0].start_ts == 122 for result in results)
     assert all(result.prompt_token_count < 12000 for result in results)
-    assert [item for item in retrieval_calls if item[0] == "lecture"] == [
-        ("lecture", 7)
+    assert [item for item in retrieval_calls if item[0] == "video"] == [
+        ("video", 7)
     ] * 4
 
 
@@ -233,7 +233,7 @@ def test_oversized_exact_prompt_is_reduced_counted_again_then_generated(rag):
     ])
     result = TutorService(
         SimpleNamespace(), model, settings(), counter
-    ).ask(None, "Why?", lecture_id=7, summary="old rolling summary")
+    ).ask(None, "Why?", video_id=7, summary="old rolling summary")
 
     assert result.grounded is True
     assert result.prompt_token_count == 11000
@@ -255,11 +255,11 @@ def test_dynamic_transcript_can_exceed_6000_but_does_not_insert_every_chunk(
         "app.services.tutor.query_cache.embed_query",
         lambda *args, **kwargs: [0, 0, 0],
     )
-    lecture_scopes = []
+    video_scopes = []
     monkeypatch.setattr(
         "app.services.tutor.retrieval.search",
-        lambda conn, embedding, top_k, lecture_id: (
-            lecture_scopes.append(lecture_id) or passages
+        lambda conn, embedding, top_k, video_id: (
+            video_scopes.append(video_id) or passages
         ),
     )
     monkeypatch.setattr(
@@ -281,7 +281,7 @@ def test_dynamic_transcript_can_exceed_6000_but_does_not_insert_every_chunk(
     )
     result = TutorService(
         SimpleNamespace(), model, dynamic_settings, counter
-    ).ask(None, "Explain bones", lecture_id=7)
+    ).ask(None, "Explain bones", video_id=7)
 
     final_prompt = counter.complete_calls[-1][1][-1][1]
     included = sum(f"relevant-{index}" in final_prompt for index in range(1, 21))
@@ -292,4 +292,4 @@ def test_dynamic_transcript_can_exceed_6000_but_does_not_insert_every_chunk(
     assert evidence_estimate > 6000
     assert included < len(passages)
     assert result.prompt_token_count <= 11000
-    assert lecture_scopes == [7]
+    assert video_scopes == [7]
