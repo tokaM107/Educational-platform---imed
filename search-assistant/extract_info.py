@@ -53,233 +53,83 @@ from app.services.llm import ChatModel, LLMUnavailable  # noqa: E402
 
 SCHEMA = {
     "users": {
-        "note": "students and doctors both live here. There is no doctors "
-                "table: a doctor is a user with role='doctor'.",
-        "columns": {
-            "id": "primary key",
-            "role": "'student' or 'doctor'",
-            "name": "full name as registered, Arabic or English",
-            "email": "unique login address",
-            "created_at": "when the account was made",
-        },
-        "filter": ("role", "name"),
-    },
-    "subjects": {
-        "note": "the academic subject a course teaches, e.g. Physiology, "
-                "Anatomy. Normalised so 'every Physiology course' is a join.",
-        "columns": {
-            "id": "primary key",
-            "name": "subject name, unique",
-        },
+        "note": "doctors are users with role='doctor'; students are never search results",
+        "columns": {"id": "primary key", "role": "student or doctor", "name": "full name"},
         "filter": ("name",),
     },
     "courses": {
-        "note": "a course one doctor teaches in one subject for one academic "
-                "year.",
+        "note": "published educational courses",
         "columns": {
-            "id": "primary key",
-            "doctor_id": "the teaching doctor, users.id",
-            "subject_id": "subjects.id, may be null",
-            "academic_year": "study year 1-7, may be null. Never a calendar year.",
-            "title": "course title as the doctor wrote it",
-            "created_at": "when it was created",
+            "id": "primary key", "doctor_id": "users.id", "title": "title",
+            "subtitle": "optional subtitle", "description": "optional description",
+            "category_id": "categories.id", "academic_year": "year 1-7",
+            "language": "ar or en", "course_level": "beginner, all_levels, or advanced",
+            "status": "draft, published, or archived", "published_at": "publication time",
         },
-        "filter": ("academic_year", "title"),
+        "filter": ("title", "subtitle", "description", "academic_year", "language", "course_level"),
     },
-    "modules": {
-        "note": "a block of lectures inside a course, e.g. 'Cardiovascular' "
-                "inside Physiology I.",
+    "books": {
+        "note": "published educational books",
         "columns": {
-            "id": "primary key",
-            "course_id": "courses.id",
-            "title": "module title, unique inside its course",
-            "position": "teaching order inside the course",
-            "created_at": "when it was created",
+            "id": "primary key", "doctor_id": "users.id", "title": "title",
+            "subtitle": "optional subtitle", "description": "optional description",
+            "category_id": "categories.id", "language": "language", "price": "price",
+            "status": "draft, published, or archived", "published_at": "publication time",
         },
-        "filter": ("title",),
+        "filter": ("title", "subtitle", "description", "language"),
     },
-    "lectures": {
-        "note": "one lecture: a video plus its transcript. This is what most "
-                "students are actually looking for.",
+    "categories": {
+        "note": "active catalog categories; a category may belong to one school or college level",
         "columns": {
-            "id": "primary key",
-            "doctor_id": "the teaching doctor, users.id",
-            "course_id": "courses.id, may be null for a standalone lecture",
-            "module_id": "modules.id, may be null if not filed yet",
-            "title": "lecture title as the doctor wrote it",
-            "video_url": "where the video is hosted",
-            "created_at": "when it was published",
+            "id": "primary key", "name_en": "English name", "name_ar": "Arabic name",
+            "slug": "URL slug", "parent_id": "parent category", "is_active": "visibility",
+            "pre_college_stage_id": "pre_college_stages.id",
+            "college_stage_id": "college_stages.id",
         },
-        "filter": ("title", "created_at"),
+        "filter": ("name_en", "name_ar", "slug"),
     },
-    "topics": {
-        "note": "a tag on a quiz question, e.g. 'Cardiac output'. Attached to "
-                "questions, not to lectures.",
+    "pre_college_stages": {
+        "note": "active school educational levels",
         "columns": {
-            "id": "primary key",
-            "name": "topic name",
-        },
-        "filter": ("name",),
-    },
-    "questions": {
-        "note": "quiz questions on a lecture. Never searchable by a student: "
-                "the rows carry the answer key.",
-        "columns": {
-            "id": "primary key",
-            "lecture_id": "lectures.id",
-            "topic_id": "topics.id, may be null",
-            "stem": "the question text",
-            "options": "JSON array of choices",
-            "correct_option": "the right answer",
-            "difficulty": "easy / medium / hard, may be null",
+            "id": "primary key", "name_en": "English name", "name_ar": "Arabic name",
+            "stage": "primary, preparatory, or secondary", "year_number": "year 1-6",
+            "is_active": "visibility",
         },
         "filter": (),
     },
-    "question_attempts": {
-        "note": "one row per answer a student gave. Analytics, not catalog.",
+    "college_stages": {
+        "note": "active college educational levels",
         "columns": {
-            "id": "primary key",
-            "student_id": "users.id",
-            "question_id": "questions.id",
-            "is_correct": "whether the answer was right",
-            "selected_option": "what the student picked, may be null",
-            "answered_at": "when they answered",
+            "id": "primary key", "name_en": "English name", "name_ar": "Arabic name",
+            "faculty": "faculty name", "year_number": "year 1-7", "is_active": "visibility",
         },
         "filter": (),
     },
-    "enrollments": {
-        "note": "which student is registered on which course. Use it to answer "
-                "'my courses' — filter on students, never expose other people's rows.",
+    "educational_levels": {
+        "note": "read-only unified search target over pre_college_stages and college_stages",
         "columns": {
-            "id": "primary key",
-            "student_id": "users.id",
-            "course_id": "courses.id",
-            "enrolled_at": "when they registered",
+            "type": "pre_college or college", "name_en": "English name",
+            "name_ar": "Arabic name", "group_name": "school stage or faculty",
+            "year_number": "academic year number",
         },
-        "filter": (),
-    },
-    "subscriptions": {
-        "note": "a student's paid access to one doctor's material. Separate "
-                "from enrolment: it decides whether a video can be watched.",
-        "columns": {
-            "id": "primary key",
-            "student_id": "users.id",
-            "doctor_id": "users.id",
-            "subscribed_at": "when they subscribed",
-        },
-        "filter": (),
-    },
-    "transcript_chunks": {
-        "note": "the lecture transcript cut into timed pieces with embeddings. "
-                "Searched by meaning, not by a filter — put anything the student "
-                "said *about the content* in the `text` field instead.",
-        "columns": {
-            "id": "primary key",
-            "lecture_id": "lectures.id",
-            "text": "the spoken words",
-            "start_ts": "seconds into the video",
-            "end_ts": "seconds into the video",
-            "embedding": "1536-dim vector",
-        },
-        "filter": (),
-    },
-    "video_events": {
-        "note": "every play, pause, seek and heartbeat while watching. Feeds "
-                "the engagement report.",
-        "columns": {
-            "id": "primary key",
-            "student_id": "users.id",
-            "lecture_id": "lectures.id",
-            "event_type": "play, pause, seek, skip, complete, rewatch_segment, "
-                          "heartbeat, tab_hidden, tab_visible",
-            "video_ts": "seconds into the video",
-            "session_id": "one sitting",
-            "created_at": "wall clock time of the event",
-        },
-        "filter": (),
-    },
-    "reports": {
-        "note": "a frozen report produced by finishing a module or an exam.",
-        "columns": {
-            "id": "primary key",
-            "student_id": "users.id",
-            "course_id": "courses.id",
-            "kind": "'module' or 'exam'",
-            "lecture_id": "lectures.id, may be null",
-            "payload": "the whole report as JSON",
-            "generated_at": "when it fired",
-        },
-        "filter": (),
-    },
-    "report_narratives": {
-        "note": "the written commentary of a weekly report, cached per week.",
-        "columns": {
-            "id": "primary key",
-            "student_id": "users.id",
-            "course_id": "courses.id",
-            "week_start": "Saturday the week starts on",
-            "fingerprint": "hash of the figures it was written from",
-            "narrative": "the commentary as JSON",
-            "generated_at": "when it was written",
-        },
-        "filter": (),
-    },
-    "notifications": {
-        "note": "how a report reaches a student or a doctor in the site.",
-        "columns": {
-            "id": "primary key",
-            "user_id": "who it is for, users.id",
-            "kind": "what kind of notice",
-            "title": "one line",
-            "body": "longer text, may be null",
-            "report_id": "reports.id, may be null",
-            "student_id": "who it is about, users.id, may be null",
-            "read_at": "when it was opened, null while unread",
-            "created_at": "when it was sent",
-        },
-        "filter": (),
-    },
-    "query_embeddings": {
-        "note": "cache of question embeddings. Infrastructure, never searched.",
-        "columns": {
-            "id": "primary key",
-            "query_hash": "sha256 of the question",
-            "model": "embedding model name",
-            "dim": "vector size",
-            "query": "the original question",
-            "embedding": "the cached vector",
-            "created_at": "when it was cached",
-        },
-        "filter": (),
+        "filter": ("type", "name_en", "name_ar", "group_name", "year_number"),
     },
 }
 
-# Foreign keys, so the model can see how a filter on one table reaches another —
-# "lectures by doctor أحمد" is a filter on users.name that arrives through
-# lectures.doctor_id. The backend owns the actual JOIN.
+# Foreign keys show how public catalog filters reach one another. The backend,
+# not the model, owns every actual JOIN.
 RELATIONS = (
     ("courses.doctor_id", "users.id"),
-    ("courses.subject_id", "subjects.id"),
-    ("modules.course_id", "courses.id"),
-    ("lectures.doctor_id", "users.id"),
-    ("lectures.course_id", "courses.id"),
-    ("lectures.module_id", "modules.id"),
-    ("enrollments.student_id", "users.id"),
-    ("enrollments.course_id", "courses.id"),
-    ("subscriptions.student_id", "users.id"),
-    ("subscriptions.doctor_id", "users.id"),
-    ("questions.lecture_id", "lectures.id"),
-    ("questions.topic_id", "topics.id"),
-    ("question_attempts.student_id", "users.id"),
-    ("question_attempts.question_id", "questions.id"),
-    ("transcript_chunks.lecture_id", "lectures.id"),
-    ("video_events.student_id", "users.id"),
-    ("video_events.lecture_id", "lectures.id"),
+    ("courses.category_id", "categories.id"),
+    ("books.doctor_id", "users.id"),
+    ("books.category_id", "categories.id"),
+    ("categories.pre_college_stage_id", "pre_college_stages.id"),
+    ("categories.college_stage_id", "college_stages.id"),
 )
 
 # What a search may return rows from. Everything else in SCHEMA is context for
 # understanding the question, not a place to send a student's results.
-TARGETS = ("lectures", "courses", "modules", "subjects", "users")
+TARGETS = ("courses", "users", "books", "categories", "educational_levels")
 
 # Comparisons the backend knows how to bind. `ilike` is a contains-match, which
 # is what a half-remembered name or title needs. The list is enforced by the
@@ -347,8 +197,8 @@ class Plan(BaseModel):
                     "unsupported when the site holds no such thing"
     )
     target: str = Field(
-        description="the table the rows come from: lectures, courses, modules, "
-                    "subjects or users. Empty when intent is not 'search'."
+        description="the result kind: courses, users (doctors), books, categories, "
+                    "or educational_levels. Empty when intent is not 'search'."
     )
     filters: list[Filter] = Field(
         default_factory=list,
@@ -356,10 +206,8 @@ class Plan(BaseModel):
     )
     text: str = Field(
         default="",
-        description="what the student said about the *content* — a topic, a "
-                    "concept, something said in the lecture. Goes to the "
-                    "transcript search, not to a filter. Empty if they only "
-                    "named people, titles or years.",
+        description="remaining catalog words to match against the target's public "
+                    "name, title, subtitle, or description fields",
     )
     sort: Literal["relevance", "newest", "position"] = Field(
         default="relevance",
@@ -388,7 +236,7 @@ class Plan(BaseModel):
 
 
 
-SYSTEM_INSTRUCTION = f"""\
+LEGACY_SYSTEM_INSTRUCTION = f"""\
 You are the first-stage query planner for the search assistant of an Egyptian medical education platform.
 
 Your job is to read the student's request exactly as written and convert it into a structured search plan.
@@ -689,6 +537,48 @@ Your output must represent what the student asked for — not what you think the
 """
 
 
+SYSTEM_INSTRUCTION = f"""\
+You are a query planner for the search assistant of an Egyptian educational platform.
+Convert the user's Arabic or English request into the structured Plan. Never write SQL
+and never claim that a database row exists.
+
+The assistant is strictly limited to these result kinds:
+- courses -> target "courses"
+- doctors -> target "users" (the backend always restricts users to role=doctor)
+- books -> target "books"
+- categories -> target "categories"
+- educational levels -> target "educational_levels". This combines school levels
+  from pre_college_stages and university levels from college_stages.
+
+Requests for lectures, modules, subjects, quizzes, transcripts, reports, students,
+enrolments, purchases, or any other resource are unsupported. Do not reveal or search
+private user data, entitlements, drafts, or archived content.
+
+{schema_text()}
+
+RULES
+1. Use only listed targets and filterable columns. Preserve names and titles as written,
+   except transliterate an Arabic doctor's name to the English spelling likely stored in
+   users.name. Keep the original words in Filter.means.
+2. A doctor filter uses users.name. Never add users.role; the backend enforces doctor.
+3. Use courses.academic_year for a course year. For an educational-level result use
+   educational_levels.year_number, and use group_name for a school stage or faculty.
+4. Use categories.name_ar for an Arabic category name and categories.name_en for an
+   English one. The same language rule applies to educational level names.
+5. Put clear structured facts in filters. Put remaining descriptive catalog keywords in
+   text; the backend searches only public metadata, never lectures or transcripts.
+6. Set intent=clarify only when a supported target is clear but no meaningful search can
+   be formed. Ask one short question in the user's language.
+7. Set intent=unsupported with a short reason for any request outside the five result
+   kinds. A mixed request is unsupported when its requested result kind is unsupported.
+8. The database resolves zero, one, or many matches. Do not guess results or ask about
+   ambiguity that can only be discovered after searching.
+9. Use relevant history for follow-up answers, replacing a previous constraint only when
+   the user corrects it.
+10. Keep the plan minimal. Never invent a filter, ID, status, visibility, or access rule.
+"""
+
+
 # ---------------------------------------------------------------------------
 # Extraction
 # ---------------------------------------------------------------------------
@@ -745,6 +635,9 @@ def envelope(query, plan):
 
     intent = plan.intent
 
+    if intent == "search" and plan.target and not target:
+        intent = "unsupported"
+
     # A search that lost everything it was going to search by is not a search.
     if intent == "search" and not (filters or plan.text.strip() or target):
         intent = "clarify"
@@ -761,7 +654,10 @@ def envelope(query, plan):
             "limit": max(1, min(plan.limit or 20, 50)),
             "missing": plan.missing,
             "clarify": plan.clarify.strip(),
-            "reason": plan.reason.strip(),
+            "reason": (
+                plan.reason.strip()
+                or ("This resource is outside catalog search." if intent == "unsupported" else "")
+            ),
             "confidence": round(plan.confidence, 2),
         },
         "dropped": dropped,
@@ -855,13 +751,12 @@ def check_schema():
 
     problems = []
 
-    for table in sorted(set(live) - set(SCHEMA)):
-        problems.append(f"table in the database but not in SCHEMA: {table}")
+    physical = set(SCHEMA) - {"educational_levels"}
 
-    for table in sorted(set(SCHEMA) - set(live)):
+    for table in sorted(physical - set(live)):
         problems.append(f"table in SCHEMA but not in the database: {table}")
 
-    for table in sorted(set(SCHEMA) & set(live)):
+    for table in sorted(physical & set(live)):
 
         described = set(SCHEMA[table]["columns"])
 
