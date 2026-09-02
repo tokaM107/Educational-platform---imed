@@ -3,12 +3,12 @@
 from app.services import retrieval
 
 
-def passage(chunk_id, start, end, distance, lecture_id=1):
+def passage(chunk_id, start, end, distance, video_id=1):
 
     return retrieval.Passage(
         chunk_id=chunk_id,
-        lecture_id=lecture_id,
-        lecture_title="Lecture",
+        video_id=video_id,
+        video_title="Video",
         text="…",
         start_ts=start,
         end_ts=end,
@@ -48,12 +48,12 @@ def test_far_apart_hits_stay_separate_and_are_ranked_by_distance():
     assert [segment.start_ts for segment in segments] == [3000, 1000]
 
 
-def test_different_lectures_never_merge():
+def test_different_videos_never_merge():
 
     segments = retrieval.to_segments(
         [
-            passage(1, 1000, 1050, 0.25, lecture_id=1),
-            passage(2, 1010, 1060, 0.26, lecture_id=2),
+            passage(1, 1000, 1050, 0.25, video_id=1),
+            passage(2, 1010, 1060, 0.26, video_id=2),
         ],
         merge_gap=20,
         lead_in=0,
