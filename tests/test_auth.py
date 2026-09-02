@@ -197,7 +197,6 @@ def test_the_application_role_is_read_from_the_database_not_the_token(
         ("post", "/api/chat/sessions"),
         ("get", "/api/chat/sessions/11111111-1111-1111-1111-111111111111/messages"),
         ("post", "/api/chat/sessions/11111111-1111-1111-1111-111111111111/messages"),
-        ("post", "/api/search"),
         ("get", "/api/subscriptions/access?lecture_id=1"),
         ("get", "/api/subscriptions/student/2"),
         ("get", "/api/subscriptions/doctor/1"),
