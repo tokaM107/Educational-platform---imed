@@ -1,17 +1,16 @@
-"""Run the plan from extract_info against the database and return a link.
+"""Run a validated plan against the public catalog and return safe result rows.
 
     from search import answer
-    answer("عايز محاضرة الدورة الدموية لدكتور أحمد")
+    answer("عايز كورسات دكتور أحمد للسنة التانية")
 
 Stage two. `extract_info` turned the sentence into a plan; this file is the only
-place that talks to Postgres, and the only place that knows what a URL looks
-like. The model's output is data here, never code: every filter is looked up in
+place that talks to Postgres. The model's output is data here, never code: every filter is looked up in
 the target's join map and bound as a parameter, so a value the model invented
 can change what is matched but never what is executed.
 
 The outcome is one of five words, and they are the whole product:
 
-    go           exactly one row matched — `url` is where to send the student
+    go           exactly one row matched
     choose       several matched — the frontend lists them and asks which
     none         the plan was valid and the catalog has nothing like it
     clarify      the sentence never had enough in it to search (from stage one)
@@ -22,14 +21,9 @@ not know that three doctors are called أحمد; it says "doctor name = أحمد
 file returns three rows, and the student picks. That is why the question is
 asked *after* the query rather than before it.
 
-Matching is plain SQL. The catalog is stored in English — names, course, module
-and lecture titles — so `ILIKE` is already case-insensitive and a contains-match
-handles a half-remembered name on its own. There is no normalisation layer here
-and there should not be one: the moment matching needs a character table, the
-answer is to fix the data or move to the semantic search, not to grow a second
-language model out of string rules.
-
-The transcript is the exception, and stays in the language it was spoken in.
+Matching is parameterized SQL over public catalog metadata. Course/book drafts,
+archived rows, inactive categories/levels, students, private access records,
+lectures, and transcripts are outside this query layer.
 """
 
 import argparse
@@ -51,11 +45,8 @@ from extract_info import extract  # noqa: E402
 # Pages
 # ---------------------------------------------------------------------------
 #
-# Every URL the site actually serves. A course, a module, a subject and a doctor
-# have no page of their own, so their rows link to a lecture inside them and say
-# so rather than inventing a route that would 404.
-
-PLAYER = "/?lecture_id={id}"
+# The API returns catalog rows. This repository has no public course/book/catalog
+# detail routes, so the assistant deliberately returns no invented links.
 
 
 # ---------------------------------------------------------------------------
@@ -65,153 +56,155 @@ PLAYER = "/?lecture_id={id}"
 # `direct` — tables reachable by a many-to-one join, already in the FROM clause.
 #            A filter on them is a plain WHERE.
 # `exists` — tables that fan out from the target. Filtering on them through the
-#            join would return the same course once per matching lecture, so
+#            join could return the same target once per matching child, so
 #            they become EXISTS subqueries instead.
 #
 # A filter naming a table in neither is dropped: there is no path from the rows
 # the student asked for to the thing they tried to filter on.
 
+LEVEL_JOIN = """
+LEFT JOIN LATERAL (
+    SELECT 'pre_college'::text AS type, p.id, p.name_en, p.name_ar,
+           p.stage AS group_name, p.year_number
+    FROM pre_college_stages p
+    WHERE p.id = cat.pre_college_stage_id AND p.is_active
+    UNION ALL
+    SELECT 'college'::text, cs.id, cs.name_en, cs.name_ar,
+           cs.faculty, cs.year_number
+    FROM college_stages cs
+    WHERE cs.id = cat.college_stage_id AND cs.is_active
+    ORDER BY type DESC
+    LIMIT 1
+) e ON TRUE
+"""
+
+LEVELS_FROM = """
+FROM (
+    SELECT 'pre_college'::text AS type, p.id, p.name_en, p.name_ar,
+           p.stage AS group_name, p.year_number, p.display_order
+    FROM pre_college_stages p WHERE p.is_active
+    UNION ALL
+    SELECT 'college'::text, cs.id, cs.name_en, cs.name_ar,
+           cs.faculty, cs.year_number, cs.display_order
+    FROM college_stages cs WHERE cs.is_active
+) e
+"""
+
+
 TARGETS = {
-    "lectures": {
-        "select": """
-            l.id, l.title,
-            u.id, u.name,
-            c.id, c.title, c.academic_year,
-            s.name,
-            m.id, m.title, m.position,
-            (SELECT count(*) FROM transcript_chunks t WHERE t.lecture_id = l.id)
-        """,
-        "from": """
-            FROM lectures l
-            LEFT JOIN users u    ON u.id = l.doctor_id
-            LEFT JOIN courses c  ON c.id = l.course_id
-            LEFT JOIN subjects s ON s.id = c.subject_id
-            LEFT JOIN modules m  ON m.id = l.module_id
-        """,
-        "direct": {
-            "lectures": "l", "users": "u", "courses": "c",
-            "subjects": "s", "modules": "m",
-        },
-        "exists": {},
-        "lecture_scope": "{cond}",
-        "order": {
-            "relevance": "c.id NULLS FIRST, m.position NULLS FIRST, l.id",
-            "newest": "l.created_at DESC, l.id DESC",
-            "position": "c.id NULLS FIRST, m.position NULLS FIRST, l.id",
-        },
-    },
     "courses": {
         "select": """
-            c.id, c.title, c.academic_year,
-            u.id, u.name,
-            s.name,
-            (SELECT count(*) FROM modules m WHERE m.course_id = c.id),
-            (SELECT count(*) FROM lectures l WHERE l.course_id = c.id),
-            (SELECT min(l.id) FROM lectures l WHERE l.course_id = c.id)
+            c.id, c.title, c.slug, c.subtitle, c.description, c.academic_year,
+            c.language, c.course_level, c.price, c.published_at,
+            u.id, u.name, cat.id, cat.name_en, cat.name_ar, cat.slug,
+            e.type, e.id, e.name_en, e.name_ar, e.group_name, e.year_number
         """,
         "from": """
             FROM courses c
-            LEFT JOIN users u    ON u.id = c.doctor_id
-            LEFT JOIN subjects s ON s.id = c.subject_id
-        """,
-        "direct": {"courses": "c", "users": "u", "subjects": "s"},
-        "exists": {
-            "modules": "EXISTS (SELECT 1 FROM modules m "
-                       "WHERE m.course_id = c.id AND {cond})",
-            "lectures": "EXISTS (SELECT 1 FROM lectures l "
-                        "WHERE l.course_id = c.id AND {cond})",
-        },
-        "lecture_scope": "EXISTS (SELECT 1 FROM lectures l "
-                         "WHERE l.course_id = c.id AND {cond})",
-        "order": {
-            "relevance": "c.academic_year NULLS LAST, c.id",
-            "newest": "c.created_at DESC, c.id DESC",
-            "position": "c.academic_year NULLS LAST, c.id",
-        },
+            JOIN users u ON u.id = c.doctor_id AND u.role = 'doctor'
+            LEFT JOIN categories cat ON cat.id = c.category_id AND cat.is_active
+        """ + LEVEL_JOIN,
+        "base": ["c.status = 'published'"],
+        "direct": {"courses": "c", "users": "u", "categories": "cat",
+                   "educational_levels": "e"},
+        "exists": {},
+        "text": "(c.title ILIKE '%%' || %s || '%%' OR c.subtitle ILIKE '%%' || %s || '%%' OR c.description ILIKE '%%' || %s || '%%')",
+        "order": {"relevance": "c.title, c.id", "newest": "c.published_at DESC NULLS LAST, c.id DESC",
+                  "position": "c.title, c.id"},
     },
-    "modules": {
+    "books": {
         "select": """
-            m.id, m.title, m.position,
-            c.id, c.title, c.academic_year,
-            u.id, u.name,
-            s.name,
-            (SELECT count(*) FROM lectures l WHERE l.module_id = m.id),
-            (SELECT min(l.id) FROM lectures l WHERE l.module_id = m.id)
+            b.id, b.title, b.slug, b.subtitle, b.description, b.language,
+            b.price, b.pdf_page_count, b.published_at,
+            u.id, u.name, cat.id, cat.name_en, cat.name_ar, cat.slug,
+            e.type, e.id, e.name_en, e.name_ar, e.group_name, e.year_number
         """,
         "from": """
-            FROM modules m
-            JOIN courses c       ON c.id = m.course_id
-            LEFT JOIN users u    ON u.id = c.doctor_id
-            LEFT JOIN subjects s ON s.id = c.subject_id
-        """,
-        "direct": {"modules": "m", "courses": "c", "users": "u", "subjects": "s"},
-        "exists": {
-            "lectures": "EXISTS (SELECT 1 FROM lectures l "
-                        "WHERE l.module_id = m.id AND {cond})",
-        },
-        "lecture_scope": "EXISTS (SELECT 1 FROM lectures l "
-                         "WHERE l.module_id = m.id AND {cond})",
-        "order": {
-            "relevance": "c.id, m.position, m.id",
-            "newest": "m.created_at DESC, m.id DESC",
-            "position": "c.id, m.position, m.id",
-        },
-    },
-    "subjects": {
-        "select": """
-            s.id, s.name,
-            (SELECT count(*) FROM courses c WHERE c.subject_id = s.id),
-            (SELECT count(*) FROM lectures l JOIN courses c ON c.id = l.course_id
-             WHERE c.subject_id = s.id),
-            (SELECT min(l.id) FROM lectures l JOIN courses c ON c.id = l.course_id
-             WHERE c.subject_id = s.id)
-        """,
-        "from": "FROM subjects s",
-        "direct": {"subjects": "s"},
-        "exists": {
-            "courses": "EXISTS (SELECT 1 FROM courses c "
-                       "WHERE c.subject_id = s.id AND {cond})",
-            "users": "EXISTS (SELECT 1 FROM courses c JOIN users u ON u.id = c.doctor_id "
-                     "WHERE c.subject_id = s.id AND {cond})",
-            "modules": "EXISTS (SELECT 1 FROM courses c JOIN modules m ON m.course_id = c.id "
-                       "WHERE c.subject_id = s.id AND {cond})",
-            "lectures": "EXISTS (SELECT 1 FROM courses c JOIN lectures l ON l.course_id = c.id "
-                        "WHERE c.subject_id = s.id AND {cond})",
-        },
-        "lecture_scope": "EXISTS (SELECT 1 FROM courses c JOIN lectures l ON l.course_id = c.id "
-                         "WHERE c.subject_id = s.id AND {cond})",
-        "order": {"relevance": "s.name", "newest": "s.id DESC", "position": "s.name"},
+            FROM books b
+            JOIN users u ON u.id = b.doctor_id AND u.role = 'doctor'
+            LEFT JOIN categories cat ON cat.id = b.category_id AND cat.is_active
+        """ + LEVEL_JOIN,
+        "base": ["b.status = 'published'"],
+        "direct": {"books": "b", "users": "u", "categories": "cat",
+                   "educational_levels": "e"},
+        "exists": {},
+        "text": "(b.title ILIKE '%%' || %s || '%%' OR b.subtitle ILIKE '%%' || %s || '%%' OR b.description ILIKE '%%' || %s || '%%')",
+        "order": {"relevance": "b.title, b.id", "newest": "b.published_at DESC NULLS LAST, b.id DESC",
+                  "position": "b.title, b.id"},
     },
     "users": {
         "select": """
-            u.id, u.name, u.role,
-            (SELECT count(*) FROM courses c WHERE c.doctor_id = u.id),
-            (SELECT count(*) FROM lectures l WHERE l.doctor_id = u.id),
-            (SELECT min(l.id) FROM lectures l WHERE l.doctor_id = u.id)
+            u.id, u.name,
+            (SELECT count(*) FROM courses c WHERE c.doctor_id = u.id AND c.status = 'published'),
+            (SELECT count(*) FROM books b WHERE b.doctor_id = u.id AND b.status = 'published')
         """,
         "from": "FROM users u",
+        "base": ["u.role = 'doctor'"],
         "direct": {"users": "u"},
         "exists": {
-            "courses": "EXISTS (SELECT 1 FROM courses c "
-                       "WHERE c.doctor_id = u.id AND {cond})",
-            "subjects": "EXISTS (SELECT 1 FROM courses c JOIN subjects s ON s.id = c.subject_id "
-                        "WHERE c.doctor_id = u.id AND {cond})",
-            "modules": "EXISTS (SELECT 1 FROM courses c JOIN modules m ON m.course_id = c.id "
-                       "WHERE c.doctor_id = u.id AND {cond})",
-            "lectures": "EXISTS (SELECT 1 FROM lectures l "
-                        "WHERE l.doctor_id = u.id AND {cond})",
+            "courses": "EXISTS (SELECT 1 FROM courses c WHERE c.doctor_id = u.id AND c.status = 'published' AND {cond})",
+            "books": "EXISTS (SELECT 1 FROM books b WHERE b.doctor_id = u.id AND b.status = 'published' AND {cond})",
+            "categories": "EXISTS (SELECT 1 FROM (SELECT doctor_id, category_id FROM courses WHERE status = 'published' UNION ALL SELECT doctor_id, category_id FROM books WHERE status = 'published') item JOIN categories cat ON cat.id = item.category_id AND cat.is_active WHERE item.doctor_id = u.id AND {cond})",
+            "educational_levels": "EXISTS (SELECT 1 FROM (SELECT doctor_id, category_id FROM courses WHERE status = 'published' UNION ALL SELECT doctor_id, category_id FROM books WHERE status = 'published') item JOIN categories cat ON cat.id = item.category_id AND cat.is_active " + LEVEL_JOIN + " WHERE item.doctor_id = u.id AND {cond})",
         },
-        "lecture_scope": "EXISTS (SELECT 1 FROM lectures l "
-                         "WHERE l.doctor_id = u.id AND {cond})",
-        "order": {"relevance": "u.name", "newest": "u.created_at DESC, u.id DESC",
-                  "position": "u.name"},
+        "text": "u.name ILIKE '%%' || %s || '%%'",
+        "order": {"relevance": "u.name, u.id", "newest": "u.created_at DESC, u.id DESC",
+                  "position": "u.name, u.id"},
+    },
+    "categories": {
+        "select": """
+            cat.id, cat.name_en, cat.name_ar, cat.slug, cat.parent_id,
+            e.type, e.id, e.name_en, e.name_ar, e.group_name, e.year_number,
+            (SELECT count(*) FROM courses c WHERE c.category_id = cat.id AND c.status = 'published'),
+            (SELECT count(*) FROM books b WHERE b.category_id = cat.id AND b.status = 'published')
+        """,
+        "from": "FROM categories cat\n" + LEVEL_JOIN,
+        "base": ["cat.is_active"],
+        "direct": {"categories": "cat", "educational_levels": "e"},
+        "exists": {
+            "courses": "EXISTS (SELECT 1 FROM courses c WHERE c.category_id = cat.id AND c.status = 'published' AND {cond})",
+            "books": "EXISTS (SELECT 1 FROM books b WHERE b.category_id = cat.id AND b.status = 'published' AND {cond})",
+            "users": "EXISTS (SELECT 1 FROM (SELECT doctor_id, category_id FROM courses WHERE status = 'published' UNION ALL SELECT doctor_id, category_id FROM books WHERE status = 'published') item JOIN users u ON u.id = item.doctor_id AND u.role = 'doctor' WHERE item.category_id = cat.id AND {cond})",
+        },
+        "text": "(cat.name_en ILIKE '%%' || %s || '%%' OR cat.name_ar ILIKE '%%' || %s || '%%')",
+        "order": {"relevance": "cat.display_order, cat.name_en, cat.id",
+                  "newest": "cat.created_at DESC, cat.id DESC",
+                  "position": "cat.display_order, cat.name_en, cat.id"},
+    },
+    "educational_levels": {
+        "select": """
+            e.type, e.id, e.name_en, e.name_ar, e.group_name, e.year_number,
+            (SELECT count(*) FROM categories cat WHERE cat.is_active AND
+                ((e.type = 'pre_college' AND cat.pre_college_stage_id = e.id) OR
+                 (e.type = 'college' AND cat.college_stage_id = e.id))),
+            (SELECT count(*) FROM courses c JOIN categories cat ON cat.id = c.category_id
+             WHERE c.status = 'published' AND cat.is_active AND
+                ((e.type = 'pre_college' AND cat.pre_college_stage_id = e.id) OR
+                 (e.type = 'college' AND cat.college_stage_id = e.id))),
+            (SELECT count(*) FROM books b JOIN categories cat ON cat.id = b.category_id
+             WHERE b.status = 'published' AND cat.is_active AND
+                ((e.type = 'pre_college' AND cat.pre_college_stage_id = e.id) OR
+                 (e.type = 'college' AND cat.college_stage_id = e.id)))
+        """,
+        "from": LEVELS_FROM,
+        "base": [],
+        "direct": {"educational_levels": "e"},
+        "exists": {
+            "categories": "EXISTS (SELECT 1 FROM categories cat WHERE cat.is_active AND ((e.type = 'pre_college' AND cat.pre_college_stage_id = e.id) OR (e.type = 'college' AND cat.college_stage_id = e.id)) AND {cond})",
+            "courses": "EXISTS (SELECT 1 FROM categories cat JOIN courses c ON c.category_id = cat.id WHERE cat.is_active AND c.status = 'published' AND ((e.type = 'pre_college' AND cat.pre_college_stage_id = e.id) OR (e.type = 'college' AND cat.college_stage_id = e.id)) AND {cond})",
+            "books": "EXISTS (SELECT 1 FROM categories cat JOIN books b ON b.category_id = cat.id WHERE cat.is_active AND b.status = 'published' AND ((e.type = 'pre_college' AND cat.pre_college_stage_id = e.id) OR (e.type = 'college' AND cat.college_stage_id = e.id)) AND {cond})",
+            "users": "EXISTS (SELECT 1 FROM categories cat JOIN (SELECT doctor_id, category_id FROM courses WHERE status = 'published' UNION ALL SELECT doctor_id, category_id FROM books WHERE status = 'published') item ON item.category_id = cat.id JOIN users u ON u.id = item.doctor_id AND u.role = 'doctor' WHERE cat.is_active AND ((e.type = 'pre_college' AND cat.pre_college_stage_id = e.id) OR (e.type = 'college' AND cat.college_stage_id = e.id)) AND {cond})",
+        },
+        "text": "(e.name_en ILIKE '%%' || %s || '%%' OR e.name_ar ILIKE '%%' || %s || '%%' OR e.group_name ILIKE '%%' || %s || '%%')",
+        "order": {"relevance": "e.type, e.display_order, e.year_number, e.id",
+                  "newest": "e.type, e.id DESC", "position": "e.type, e.display_order, e.year_number, e.id"},
     },
 }
 
 # Columns that are not text. Folding a smallint is a type error, and a year the
 # model wrote as "2026" has to fail loudly rather than match nothing quietly.
-NUMERIC = {("courses", "academic_year"), ("modules", "position")}
-TEMPORAL = {("lectures", "created_at")}
+NUMERIC = {("courses", "academic_year"), ("educational_levels", "year_number")}
+TEMPORAL = set()
 
 
 # ---------------------------------------------------------------------------
@@ -233,8 +226,8 @@ def condition(spec, item):
             return None, f"no path from this search to {table}"
 
         # Inside an EXISTS the subquery uses the table's own name as its alias.
-        alias = {"users": "u", "courses": "c", "modules": "m",
-                 "lectures": "l", "subjects": "s"}[table]
+        alias = {"users": "u", "courses": "c", "books": "b",
+                 "categories": "cat", "educational_levels": "e"}[table]
         wrapper = spec["exists"][table]
 
     col = f"{alias}.{column}"
@@ -247,7 +240,10 @@ def condition(spec, item):
         if not value.lstrip("-").isdigit():
             return None, f"{column} needs a number, got {value!r}"
 
-        sql, params = f"{col} = %s::smallint", [int(value)]
+        compare = {"eq": "=", "gte": ">=", "lte": "<="}.get(op)
+        if compare is None:
+            return None, f"{op} is not supported on a number"
+        sql, params = f"{col} {compare} %s::smallint", [int(value)]
 
     elif key in TEMPORAL:
         cast = {"gte": ">=", "lte": "<=", "eq": "::date ="}.get(op, ">=")
@@ -280,7 +276,7 @@ def build(plan):
     target = plan["target"]
     spec = TARGETS[target]
 
-    where = []
+    where = list(spec.get("base", []))
     params = []
     dropped = []
 
@@ -298,16 +294,9 @@ def build(plan):
     text = plan.get("text", "").strip()
 
     if text:
-        # Content words match the lecture title or anything said in it. The
-        # transcript is the point: "the lecture where he explained the cardiac
-        # cycle" is not a title, it is something in the middle of a video.
-        inner = (
-            "(l.title ILIKE '%%' || %s || '%%'"
-            " OR EXISTS (SELECT 1 FROM transcript_chunks t"
-            " WHERE t.lecture_id = l.id AND t.text ILIKE '%%' || %s || '%%'))"
-        )
-        where.append(spec["lecture_scope"].format(cond=inner))
-        params.extend([text, text])
+        metadata_search = spec["text"]
+        where.append(metadata_search)
+        params.extend([text] * metadata_search.count("%s"))
 
     clause = "\nWHERE " + "\n  AND ".join(where) if where else ""
     order = spec["order"].get(plan.get("sort", "relevance"), spec["order"]["relevance"])
@@ -329,99 +318,123 @@ def _person(user_id, name):
     return None if user_id is None else {"id": user_id, "name": name}
 
 
-def _lecture(row):
-
-    (lecture_id, title, doctor_id, doctor, course_id, course, year,
-     subject, module_id, module, position, chunks) = row
-
+def _level(values):
+    level_type, level_id, name_en, name_ar, group_name, year_number = values
+    if level_id is None:
+        return None
     return {
-        "kind": "lecture",
-        "id": lecture_id,
-        "title": title,
-        "doctor": _person(doctor_id, doctor),
-        "course": None if course_id is None else {
-            "id": course_id, "title": course, "academic_year": year,
-        },
-        "subject": subject,
-        "module": None if module_id is None else {
-            "id": module_id, "title": module, "position": position,
-        },
-        "transcript_chunks": chunks,
-        "url": PLAYER.format(id=lecture_id),
-        "url_opens": "the lecture page",
+        "kind": "educational_level", "type": level_type, "id": level_id,
+        "name_en": name_en, "name_ar": name_ar, "group_name": group_name,
+        "year_number": year_number,
     }
 
 
-def _course(row):
+def _category(values):
+    category_id, name_en, name_ar, slug = values
+    if category_id is None:
+        return None
+    return {"id": category_id, "name_en": name_en, "name_ar": name_ar, "slug": slug}
 
-    course_id, title, year, doctor_id, doctor, subject, modules, lectures, first = row
+
+def _course(row):
+    (course_id, title, slug, subtitle, description, year, language, course_level,
+     price, published_at, doctor_id, doctor, category_id, category_en, category_ar,
+     category_slug, *level) = row
 
     return {
         "kind": "course",
         "id": course_id,
         "title": title,
+        "slug": slug,
+        "subtitle": subtitle,
+        "description": description,
         "academic_year": year,
-        "subject": subject,
+        "language": language,
+        "course_level": course_level,
+        "price": price,
+        "published_at": published_at,
         "doctor": _person(doctor_id, doctor),
-        "modules": modules,
-        "lectures": lectures,
-        "url": None if first is None else PLAYER.format(id=first),
-        "url_opens": "the first lecture — the site has no course page",
+        "category": _category((category_id, category_en, category_ar, category_slug)),
+        "educational_level": _level(level),
+        "url": None,
+        "url_opens": "no public course route is defined in this API",
     }
 
 
-def _module(row):
-
-    (module_id, title, position, course_id, course, year,
-     doctor_id, doctor, subject, lectures, first) = row
+def _book(row):
+    (book_id, title, slug, subtitle, description, language, price, page_count,
+     published_at, doctor_id, doctor, category_id, category_en, category_ar,
+     category_slug, *level) = row
 
     return {
-        "kind": "module",
-        "id": module_id,
+        "kind": "book",
+        "id": book_id,
         "title": title,
-        "position": position,
-        "course": {"id": course_id, "title": course, "academic_year": year},
-        "subject": subject,
+        "slug": slug,
+        "subtitle": subtitle,
+        "description": description,
+        "language": language,
+        "price": price,
+        "page_count": page_count,
+        "published_at": published_at,
         "doctor": _person(doctor_id, doctor),
-        "lectures": lectures,
-        "url": None if first is None else PLAYER.format(id=first),
-        "url_opens": "the first lecture — the site has no module page",
+        "category": _category((category_id, category_en, category_ar, category_slug)),
+        "educational_level": _level(level),
+        "url": None,
+        "url_opens": "no public book route is defined in this API",
     }
 
 
-def _subject(row):
-
-    subject_id, name, courses, lectures, first = row
+def _category_row(row):
+    (category_id, name_en, name_ar, slug, parent_id, *rest) = row
+    level, courses, books = rest[:6], rest[6], rest[7]
 
     return {
-        "kind": "subject",
-        "id": subject_id,
-        "name": name,
+        "kind": "category",
+        "id": category_id,
+        "name": name_ar or name_en,
+        "name_en": name_en,
+        "name_ar": name_ar,
+        "slug": slug,
+        "parent_id": parent_id,
+        "educational_level": _level(level),
         "courses": courses,
-        "lectures": lectures,
-        "url": None if first is None else PLAYER.format(id=first),
-        "url_opens": "a lecture in the subject — the site has no subject page",
+        "books": books,
+        "url": None,
+        "url_opens": "no public category route is defined in this API",
     }
 
 
 def _user(row):
-
-    user_id, name, role, courses, lectures, first = row
+    user_id, name, courses, books = row
 
     return {
-        "kind": role,
+        "kind": "doctor",
         "id": user_id,
         "name": name,
         "courses": courses,
-        "lectures": lectures,
-        "url": None if first is None else PLAYER.format(id=first),
-        "url_opens": "one of their lectures — the site has no doctor page",
+        "books": books,
+        "url": None,
+        "url_opens": "no public doctor route is defined in this API",
+    }
+
+
+def _educational_level(row):
+    level_type, level_id, name_en, name_ar, group_name, year, categories, courses, books = row
+    return {
+        **_level((level_type, level_id, name_en, name_ar, group_name, year)),
+        "name": name_ar or name_en,
+        "categories": categories,
+        "courses": courses,
+        "books": books,
+        "url": None,
+        "url_opens": "no public educational-level route is defined in this API",
     }
 
 
 ROW = {
-    "lectures": _lecture, "courses": _course, "modules": _module,
-    "subjects": _subject, "users": _user,
+    "courses": _course, "users": _user, "books": _book,
+    "categories": _category_row, "educational_levels": _educational_level,
 }
 
 
@@ -435,16 +448,18 @@ def search(envelope, conn=None):
 
     plan = envelope.get("plan", envelope) if isinstance(envelope, dict) else envelope
     query = envelope.get("query", "") if isinstance(envelope, dict) else ""
+    validation_drops = envelope.get("dropped", []) if isinstance(envelope, dict) else []
 
     if plan is None:
         return _out(query, "error", notes=[envelope.get("error", "no plan")])
 
     if plan["intent"] == "clarify":
         return _out(query, "clarify", plan=plan, clarify=plan.get("clarify", ""),
-                    missing=plan.get("missing", []))
+                    missing=plan.get("missing", []), dropped=validation_drops)
 
     if plan["intent"] == "unsupported":
-        return _out(query, "unsupported", plan=plan, reason=plan.get("reason", ""))
+        return _out(query, "unsupported", plan=plan, reason=plan.get("reason", ""),
+                    dropped=validation_drops)
 
     if plan["target"] not in TARGETS:
         return _out(query, "error", plan=plan,
@@ -472,7 +487,7 @@ def search(envelope, conn=None):
         plan=plan,
         results=results,
         url=results[0]["url"] if outcome == "go" else None,
-        dropped=dropped,
+        dropped=validation_drops + dropped,
         notes=notes,
         sql=sql,
         params=[list(p) if isinstance(p, list) else p for p in params],
@@ -484,7 +499,7 @@ def diagnose(plan, conn=None):
 
     "Nothing found" is not an answer anyone can act on. Every filter is re-run
     on its own, so the reply can say *which* condition matched nothing — a
-    misspelled doctor, a subject nobody teaches, a year with no courses. The
+    misspelled doctor, an empty category, a year with no courses. The
     frontend can drop that one filter and offer the rest; whoever is reading the
     logs can see a value that never matches anything and go fix the data.
 
