@@ -63,10 +63,13 @@ def test_api_chat_never_imports_or_contacts_huggingface_for_counting(monkeypatch
             return SimpleNamespace(total_tokens=220)
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
+    monkeypatch.setattr(
+        chat.subscriptions, "can_watch_video", lambda *args: (True, 7, "Anatomy")
+    )
     passage = Passage(
         chunk_id=9,
-        lecture_id=1,
-        lecture_title="Anatomy",
+        video_id=1,
+        video_title="Anatomy",
         text="Pneumatic bones contain air spaces.",
         start_ts=60,
         end_ts=75,
@@ -78,11 +81,11 @@ def test_api_chat_never_imports_or_contacts_huggingface_for_counting(monkeypatch
     )
     monkeypatch.setattr(
         "app.services.tutor.retrieval.search",
-        lambda conn, embedding, top_k, lecture_id: [passage],
+        lambda conn, embedding, top_k, video_id: [passage],
     )
     monkeypatch.setattr(
         "app.services.tutor.retrieval.by_chunk_ids",
-        lambda conn, ids, lecture_id: [],
+        lambda conn, ids, video_id: [],
     )
     settings = SimpleNamespace(
         chat_model="gemini-test",
@@ -122,7 +125,7 @@ def test_api_chat_never_imports_or_contacts_huggingface_for_counting(monkeypatch
 
     response = TestClient(application).post(
         "/api/chat",
-        json={"message": "What are pneumatic bones?", "lecture_id": 1},
+        json={"message": "What are pneumatic bones?", "video_id": 1},
     )
 
     assert response.status_code == 200
@@ -144,8 +147,12 @@ def test_exact_count_failure_returns_controlled_503(monkeypatch):
         def count_tokens(self, **kwargs):
             raise OSError("count endpoint unavailable")
 
+    monkeypatch.setattr(
+        chat.subscriptions, "can_watch_video", lambda *args: (True, 7, "Anatomy")
+    )
+
     passage = Passage(
-        chunk_id=9, lecture_id=1, lecture_title="Anatomy",
+        chunk_id=9, video_id=1, video_title="Anatomy",
         text="Pneumatic bones contain air spaces.", start_ts=60, end_ts=75,
         distance=.2,
     )
@@ -183,7 +190,7 @@ def test_exact_count_failure_returns_controlled_503(monkeypatch):
     application.dependency_overrides[deps.chat_llm_quota] = lambda: None
 
     response = TestClient(application, raise_server_exceptions=False).post(
-        "/api/chat", json={"message": "What are pneumatic bones?", "lecture_id": 1}
+        "/api/chat", json={"message": "What are pneumatic bones?", "video_id": 1}
     )
 
     assert response.status_code == 503
