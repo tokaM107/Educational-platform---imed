@@ -56,6 +56,10 @@ def api(monkeypatch):
     application.include_router(chat.router)
     monkeypatch.setattr(chat.subscriptions, "can_watch_video",
                         lambda conn, student_id, video_id: (True, 1, "Anatomy"))
+    monkeypatch.setattr(
+        chat.subscriptions, "accessible_course_video_ids",
+        lambda conn, student_id, video_id, enforce_subscriptions: [video_id],
+    )
     return application
 
 
@@ -195,6 +199,7 @@ def test_post_message_persists_standalone_query_citations_and_usage(api):
     answer_params = conn.params_for("VALUES (%s, %s, 'assistant'")
     assert answer_params[10] == 36
     assert tutor.calls[0]["video_id"] == 7
+    assert tutor.calls[0]["accessible_video_ids"] == [7]
     assert conn.params_for("next_message_order = next_message_order + 2") == (SESSION_ID,)
     assert conn.params_for("role = 'user' AND idempotency_key") == (
         SESSION_ID, "request-0001")
