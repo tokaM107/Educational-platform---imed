@@ -37,7 +37,6 @@ def _dependency_calls(router, path):
             "/api/chat/sessions/{session_id}/messages",
             deps.chat_llm_quota,
         ),
-        (search.router, "/api/search", deps.search_llm_quota),
         (
             grading_demo.router,
             "/api/grading-demo/generate-criteria",
@@ -67,6 +66,13 @@ def test_every_llm_route_requires_shared_auth_and_daily_quota(
 
     assert deps.get_current_user in calls
     assert quota_dependency in calls
+
+
+def test_public_search_has_no_authentication_or_quota_dependency():
+    calls = _dependency_calls(search.router, "/api/search")
+
+    assert deps.get_current_user not in calls
+    assert deps.search_llm_quota not in calls
 
 
 @pytest.mark.parametrize("narrative,expected_calls", [(True, 1), (False, 0)])
@@ -111,6 +117,19 @@ def test_quota_reservation_uses_user_feature_and_shared_limit():
         42, 1, "chat", 1, "chat", "chat", 1, 10,
     )
     assert conn.committed == 1
+
+
+def test_quota_feature_key_is_explicitly_typed_for_postgres():
+    """jsonb_build_object's variadic key does not infer a bound string type."""
+
+    conn = FakeConn(
+        lambda sql, params: [(1, 3600)] if "INSERT INTO llm_daily_usage" in sql else []
+    )
+
+    llm_quota.consume(conn, 42, "search", limit=10)
+
+    sql = next(sql for sql, _ in conn.calls if "INSERT INTO llm_daily_usage" in sql)
+    assert "jsonb_build_object(%s::text, %s)" in sql
 
 
 def test_quota_rejects_when_atomic_upsert_cannot_reserve_more():
