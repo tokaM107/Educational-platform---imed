@@ -1,10 +1,8 @@
 """Smart Search Assistant: request and reply.
 
-The plan and the result rows stay loosely typed on purpose. A result is a
-lecture, a course, a module, a subject or a doctor depending on what was asked
-for, and five response models that differ in four fields each would describe the
-same thing five times. The envelope around them is what callers actually branch
-on, and that is pinned.
+The plan and result rows stay loosely typed on purpose. A result is a course,
+doctor, book, category, or educational level. The envelope around those safe
+catalog shapes is what callers branch on, and that is pinned.
 """
 
 from pydantic import BaseModel, Field
