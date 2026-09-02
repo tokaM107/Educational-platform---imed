@@ -46,6 +46,21 @@ VIDEO_DOCTOR_SQL = """
     WHERE item.id = %s AND item.type = 'video'
 """
 
+VIDEO_SCOPE_SQL = """
+    SELECT c.doctor_id, item.is_preview, item.course_id
+    FROM course_items AS item
+    JOIN courses AS c ON c.id = item.course_id
+    WHERE item.id = %s AND item.type = 'video'
+"""
+
+COURSE_VIDEOS_SQL = """
+    SELECT id
+    FROM course_items
+    WHERE course_id = %s AND type = 'video'
+      AND (%s OR is_preview)
+    ORDER BY order_index, id
+"""
+
 COURSE_DOCTOR_SQL = "SELECT doctor_id, title FROM courses WHERE id = %s"
 
 
@@ -98,6 +113,37 @@ def can_watch_video(conn, student_id, video_id):
         return True, doctor_id, title
 
     return has_access(conn, student_id, doctor_id), doctor_id, title
+
+
+def accessible_course_video_ids(
+    conn, student_id, video_id, enforce_subscriptions=True
+):
+    """Videos whose transcripts may be exposed from this video's course.
+
+    A subscribed student (or the owning doctor) may use every video in the
+    course. A student who reached the opened video only because it is a preview
+    may use preview transcripts only. Disabling subscription enforcement in
+    development opens the whole course, but never another course.
+    """
+
+    with conn.cursor() as cur:
+        cur.execute(VIDEO_SCOPE_SQL, (video_id,))
+        row = cur.fetchone()
+
+    if row is None:
+        return []
+
+    doctor_id, is_preview, course_id = row
+    owns_content = student_id is not None and int(student_id) == doctor_id
+    subscribed = owns_content or has_access(conn, student_id, doctor_id)
+    include_paid = not enforce_subscriptions or subscribed
+
+    if enforce_subscriptions and not include_paid and not is_preview:
+        return []
+
+    with conn.cursor() as cur:
+        cur.execute(COURSE_VIDEOS_SQL, (course_id, include_paid))
+        return [row[0] for row in cur.fetchall()]
 
 
 def can_enrol(conn, student_id, course_id):
