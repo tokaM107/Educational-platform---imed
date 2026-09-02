@@ -102,7 +102,7 @@ class TutorService:
             logger.warning("follow-up contextualization failed; using original: %s", error)
             return question, None
 
-    def ask(self, conn, question, lecture_id=None, history=None, summary="",
+    def ask(self, conn, question, video_id=None, history=None, summary="",
             continuity_chunk_ids=None):
         question = (question or "").strip()
         if not question:
@@ -115,10 +115,10 @@ class TutorService:
         candidates = retrieval.keep_relevant(retrieval.search(
             conn, query_embedding,
             top_k=self.settings.chat_retrieval_candidate_limit,
-            lecture_id=lecture_id,
+            video_id=video_id,
         ))
         continuity = retrieval.by_chunk_ids(
-            conn, list(continuity_chunk_ids or [])[:3], lecture_id
+            conn, list(continuity_chunk_ids or [])[:3], video_id
         )
         rewrite_input = rewrite_usage.input_tokens if rewrite_usage else None
         rewrite_output = rewrite_usage.output_tokens if rewrite_usage else None
