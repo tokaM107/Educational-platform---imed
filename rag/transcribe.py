@@ -1,22 +1,17 @@
-"""Lecture video -> transcript, with the video living on Bunny Stream.
+"""Course-item video -> transcript, with the video living on Bunny Stream.
 
-    # a lecture that is still a local file: upload it, then transcribe
-    python -m rag.transcribe --lecture-id 1 --video sample1.mp4
-
-    # a lecture already in the Stream library
-    python -m rag.transcribe --lecture-id 1 --bunny-video-id <guid>
+    python -m rag.transcribe --video-id 11
 
     # everything up to the audio, without loading the ASR model
-    python -m rag.transcribe --lecture-id 1 --video sample1.mp4 --audio-only
+    python -m rag.transcribe --video-id 11 --audio-only
 
 What changed from the old script: the video is no longer read from
 data/videos/. It is uploaded to Bunny once, and from then on the pipeline reads
 its audio straight off the CDN — so re-transcribing a lecture needs nothing on
 this machine, and neither does transcribing one somebody else uploaded.
 
-The guid is written back to `lectures.bunny_video_id`, which is what makes the
-upload happen exactly once. Run this twice on the same lecture and the second
-run skips straight to the audio.
+The Bunny guid is read from `course_items.video_ref`. Video creation and upload
+belong to the Nest API, so this pipeline never mutates the shared catalog.
 
 Ordering matters here and the steps are deliberately separate: uploading is
 slow and idempotent, encoding is slow and out of our hands, extraction is slow
@@ -25,7 +20,6 @@ should never cost the first three again.
 """
 
 import argparse
-from pathlib import Path
 
 from app.config import get_settings
 from app.db import connection
@@ -39,17 +33,7 @@ def parse_args(argv=None):
         description="Upload a lecture to Bunny Stream and transcribe it."
     )
 
-    parser.add_argument("--lecture-id", type=int, required=True)
-    parser.add_argument(
-        "--video",
-        help="file name inside data/videos (or a path), to upload if the "
-             "lecture is not on Bunny yet",
-    )
-    parser.add_argument(
-        "--bunny-video-id",
-        help="use this existing Bunny video instead of uploading",
-    )
-    parser.add_argument("--title", help="title for a newly created Bunny video")
+    parser.add_argument("--video-id", type=int, required=True)
     parser.add_argument("--output", help="transcript path")
     parser.add_argument("--chunk-seconds", type=int, default=CHUNK_SECONDS)
     parser.add_argument(
@@ -72,40 +56,17 @@ def parse_args(argv=None):
 # -------------------------
 
 
-def read_lecture(conn, lecture_id):
+def read_video(conn, video_id):
 
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, title, video_url, bunny_video_id FROM lectures WHERE id = %s",
-            (lecture_id,),
+            """
+            SELECT id, title, video_provider, video_ref
+            FROM course_items WHERE id = %s AND type = 'video'
+            """,
+            (video_id,),
         )
         return cur.fetchone()
-
-
-def save_bunny_id(conn, lecture_id, guid):
-
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE lectures SET bunny_video_id = %s WHERE id = %s",
-            (guid, lecture_id),
-        )
-    conn.commit()
-
-
-def resolve_local_video(name):
-    """A --video argument as a path. A bare name means data/videos/<name>."""
-
-    settings = get_settings()
-
-    candidate = Path(name)
-
-    if not candidate.is_absolute() and not candidate.exists():
-        candidate = settings.video_dir / candidate.name
-
-    if not candidate.is_file():
-        raise SystemExit(f"no such video file: {candidate}")
-
-    return candidate
 
 
 # -------------------------
@@ -124,37 +85,28 @@ def main(argv=None):
 
     with connection() as conn:
 
-        lecture = read_lecture(conn, args.lecture_id)
+        item = read_video(conn, args.video_id)
 
-        if lecture is None:
-            raise SystemExit(f"no lecture with id {args.lecture_id}")
+        if item is None:
+            raise SystemExit(f"no course-item video with id {args.video_id}")
 
-        _, title, video_url, stored_guid = lecture
+        _, title, provider, guid = item
+        if provider not in (None, "bunny"):
+            raise SystemExit(f"video provider {provider!r} is not supported")
 
-        # Explicit argument wins, then whatever the row already knows. Only when
-        # neither exists does anything get uploaded.
-        guid = args.bunny_video_id or stored_guid
+        print(f"Video {args.video_id}: {title}")
 
-        print(f"Lecture {args.lecture_id}: {title}")
+        if not guid:
+            raise SystemExit(f"video {args.video_id} has no video_ref")
 
-        if guid:
-            print(f"1. Bunny video {guid} (already uploaded)")
-            local = None
-        else:
-            local = resolve_local_video(args.video or video_url or "")
-            size_mb = local.stat().st_size / 1024 / 1024
-            print(f"1. Uploading {local.name} ({size_mb:.0f} MB) to Bunny…")
+        print(f"1. Bunny video {guid}")
 
         guid, video = bunny.ensure_uploaded(
-            title=args.title or title,
-            path=local,
+            title=title,
+            path=None,
             guid=guid,
             on_progress=report_progress,
         )
-
-        if guid != stored_guid:
-            save_bunny_id(conn, args.lecture_id, guid)
-            print(f"   saved lectures.bunny_video_id = {guid}")
 
     length = video.get("length") or 0
     print(
@@ -194,7 +146,7 @@ def main(argv=None):
         return
 
     output = args.output or (
-        settings.transcript_dir / f"lecture_{args.lecture_id}.txt"
+        settings.transcript_dir / f"video_{args.video_id}.txt"
     )
 
     # Imported here, not at module level: it pulls in transformers and a
@@ -209,7 +161,7 @@ def main(argv=None):
     transcribe_chunks(chunks, output_path=output)
 
     print(
-        f"\nNext: python -m rag.ingest --lecture-id {args.lecture_id} "
+        f"\nNext: python -m rag.ingest --video-id {args.video_id} "
         f"--transcript {output}"
     )
 
