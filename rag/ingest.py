@@ -1,11 +1,11 @@
 """Offline pipeline: transcript file -> chunks -> embeddings -> Postgres.
 
-    python -m rag.ingest --lecture-id 1 --title "Anatomy — Skeletal System" \
-        --transcript data/transcripts/transcript.txt --video sample1.mp4
+    python -m rag.ingest --video-id 11 \
+        --transcript data/transcripts/video_11.txt
 
     python -m rag.ingest --dry-run     # chunk only: no API calls, no database
 
-Re-running replaces that lecture's chunks instead of piling up duplicates.
+Re-running replaces that video's chunks instead of piling up duplicates.
 """
 
 import argparse
@@ -27,14 +27,7 @@ def parse_args(argv=None):
         "--transcript",
         default=str(settings.transcript_dir / "transcript.txt"),
     )
-    parser.add_argument("--lecture-id", type=int, default=1)
-    parser.add_argument("--title", default="Anatomy — Skeletal System")
-    parser.add_argument(
-        "--video",
-        default="sample1.mp4",
-        help="file name inside data/videos",
-    )
-    parser.add_argument("--doctor-id", type=int, default=None)
+    parser.add_argument("--video-id", type=int, required=True)
     parser.add_argument("--chunk-words", type=int, default=settings.chunk_words)
     parser.add_argument("--overlap-words", type=int, default=settings.overlap_words)
     parser.add_argument(
@@ -51,56 +44,27 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def ensure_lecture(conn, lecture_id, title, video, doctor_id=None):
-    """Create or update the lecture row the chunks hang off."""
+def require_video(conn, video_id):
+    """Return the existing course-item video; catalog creation belongs to Nest."""
 
     with conn.cursor() as cur:
 
-        if doctor_id is None:
-
-            cur.execute(
-                "SELECT id FROM users WHERE role = 'doctor' ORDER BY id LIMIT 1"
-            )
-            row = cur.fetchone()
-
-            if row:
-                doctor_id = row[0]
-
-            else:
-                cur.execute(
-                    """
-                    INSERT INTO users (role, name, email)
-                    VALUES ('doctor', 'Test Doctor', 'doctor@example.com')
-                    RETURNING id
-                    """
-                )
-                doctor_id = cur.fetchone()[0]
-
         cur.execute(
             """
-            INSERT INTO lectures (id, doctor_id, title, video_url)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (id) DO UPDATE
-                SET title = EXCLUDED.title,
-                    video_url = EXCLUDED.video_url
+            SELECT id, title FROM course_items
+            WHERE id = %s AND type = 'video'
             """,
-            (lecture_id, doctor_id, title, video),
+            (video_id,),
         )
+        row = cur.fetchone()
 
-        # Keep the SERIAL sequence ahead of any id we forced in
-        cur.execute(
-            """
-            SELECT setval(
-                pg_get_serial_sequence('lectures', 'id'),
-                GREATEST((SELECT MAX(id) FROM lectures), 1)
-            )
-            """
-        )
+    if row is None:
+        raise SystemExit(f"no course-item video with id {video_id}")
 
-    conn.commit()
+    return row
 
 
-def load_existing_embeddings(conn, lecture_id):
+def load_existing_embeddings(conn, video_id):
     """text -> stored vector, for chunks already in the database.
 
     Chunking is deterministic, so re-running ingest after a small transcript
@@ -113,33 +77,33 @@ def load_existing_embeddings(conn, lecture_id):
             """
             SELECT text, embedding
             FROM transcript_chunks
-            WHERE lecture_id = %s AND embedding IS NOT NULL
+            WHERE video_id = %s AND embedding IS NOT NULL
             """,
-            (lecture_id,),
+            (video_id,),
         )
 
         return {row[0]: row[1] for row in cur.fetchall()}
 
 
-def replace_chunks(conn, lecture_id, chunks, embeddings):
-    """Swap in a fresh set of chunks for this lecture, in one transaction."""
+def replace_chunks(conn, video_id, chunks, embeddings):
+    """Swap in a fresh set of chunks for this video, in one transaction."""
 
     with conn.cursor() as cur:
 
         cur.execute(
-            "DELETE FROM transcript_chunks WHERE lecture_id = %s",
-            (lecture_id,),
+            "DELETE FROM transcript_chunks WHERE video_id = %s",
+            (video_id,),
         )
 
         cur.executemany(
             """
             INSERT INTO transcript_chunks
-            (lecture_id, text, start_ts, end_ts, embedding)
+            (video_id, text, start_ts, end_ts, embedding)
             VALUES (%s, %s, %s, %s, %s)
             """,
             [
                 (
-                    lecture_id,
+                    video_id,
                     chunk.text,
                     chunk.start_ts,
                     chunk.end_ts,
@@ -190,18 +154,13 @@ def main(argv=None):
     try:
         with connection() as conn:
 
-            ensure_lecture(
-                conn,
-                args.lecture_id,
-                args.title,
-                args.video,
-                args.doctor_id,
-            )
+            _, title = require_video(conn, args.video_id)
+            print(f"Video {args.video_id}: {title}")
 
             # Vectors already in the database are reused as-is; only new or
             # edited text is sent to the embedding API.
             stored = {} if args.reembed else load_existing_embeddings(
-                conn, args.lecture_id
+                conn, args.video_id
             )
 
             missing = [chunk for chunk in chunks if chunk.text not in stored]
@@ -226,12 +185,12 @@ def main(argv=None):
 
             embeddings = [stored[chunk.text] for chunk in chunks]
 
-            replace_chunks(conn, args.lecture_id, chunks, embeddings)
+            replace_chunks(conn, args.video_id, chunks, embeddings)
 
     finally:
         close_pool()
 
-    print(f"\nStored {len(chunks)} chunks for lecture {args.lecture_id}")
+    print(f"\nStored {len(chunks)} chunks for video {args.video_id}")
 
     return 0
 
