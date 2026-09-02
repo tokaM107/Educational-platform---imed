@@ -1,4 +1,4 @@
-"""Authenticated lecture-scoped conversational RAG endpoints."""
+"""Authenticated video-first, course-aware conversational RAG endpoints."""
 
 from __future__ import annotations
 
@@ -88,6 +88,17 @@ def _require_video_access(conn, student_id, video_id):
             "video_id": video_id, "video_title": title, "doctor_id": doctor_id,
         })
     return title
+
+
+def _require_course_video_scope(conn, student_id, video_id):
+    title = _require_video_access(conn, student_id, video_id)
+    video_ids = subscriptions.accessible_course_video_ids(
+        conn, student_id, video_id,
+        enforce_subscriptions=get_settings().enforce_subscriptions,
+    )
+    if video_id not in video_ids:
+        raise HTTPException(status_code=403, detail="Video transcript access denied")
+    return title, video_ids
 
 
 def _memory_rows(rows):
@@ -297,7 +308,9 @@ def create_chat_message(session_id: UUID, data: ChatMessageCreate,
         if session is None:
             raise HTTPException(status_code=404, detail="Chat session not found")
         video_id, summary, checkpoint, next_order = session
-        video_title = _require_video_access(conn, current_user["id"], video_id)
+        _video_title, accessible_video_ids = _require_course_video_scope(
+            conn, current_user["id"], video_id
+        )
 
         cur.execute("""
             SELECT id, content FROM chat_messages
@@ -323,12 +336,11 @@ def create_chat_message(session_id: UUID, data: ChatMessageCreate,
                     "user_message_id": existing[0],
                 })
             assistant_message = _stored_message(assistant_row)
-            restored_passages = [retrieval.Passage(
-                chunk_id=item.chunk_id, video_id=item.video_id,
-                video_title=video_title, text=item.text,
-                start_ts=item.start_ts, end_ts=item.end_ts,
-                distance=item.distance,
-            ) for item in (assistant_message.citations or [])]
+            restored_passages = retrieval.by_chunk_ids(
+                conn,
+                [item.chunk_id for item in (assistant_message.citations or [])],
+                accessible_video_ids,
+            )
             restored = SimpleNamespace(segments=retrieval.to_segments(restored_passages))
             segments = _segments(restored)
             return _turn_response(user_message, assistant_message, segments=segments)
@@ -366,7 +378,8 @@ def create_chat_message(session_id: UUID, data: ChatMessageCreate,
     started_at = time.monotonic()
     try:
         result = tutor.ask(
-            conn, question=data.content, video_id=video_id, history=history,
+            conn, question=data.content, video_id=video_id,
+            accessible_video_ids=accessible_video_ids, history=history,
             summary=bound_text(summary, settings.chat_summary_tokens, counter),
             continuity_chunk_ids=continuity_ids,
         )
@@ -454,10 +467,13 @@ def create_chat_message(session_id: UUID, data: ChatMessageCreate,
 def chat(data: ChatRequest, conn=Depends(get_conn), tutor=Depends(get_tutor),
          current_user=Depends(get_current_user),
          _quota=Depends(chat_llm_quota)):
-    _require_video_access(conn, current_user["id"], data.video_id)
+    _, accessible_video_ids = _require_course_video_scope(
+        conn, current_user["id"], data.video_id
+    )
     try:
         result = tutor.ask(
             conn, question=data.message, video_id=data.video_id,
+            accessible_video_ids=accessible_video_ids,
             history=[(message.role, message.content) for message in data.history],
         )
     except ExactTokenCountUnavailable as error:
