@@ -114,7 +114,7 @@ def build_context(passages):
 
         blocks.append(
             f"[{index}] ({to_stamp(passage.start_ts)} - {to_stamp(passage.end_ts)}) "
-            f"من محاضرة «{passage.lecture_title}»:\n{passage.text}"
+            f"من فيديو «{passage.video_title}»:\n{passage.text}"
         )
 
     return "\n\n".join(blocks)
