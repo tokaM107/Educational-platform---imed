@@ -50,6 +50,33 @@ SEARCH_SQL = """
     LIMIT %(top_k)s
 """
 
+COURSE_FALLBACK_SQL = """
+    SELECT
+        c.id,
+        c.video_id,
+        item.title,
+        c.text,
+        c.start_ts,
+        c.end_ts,
+        c.embedding <=> %(query)s AS distance
+    FROM transcript_chunks AS c
+    JOIN course_items AS item ON item.id = c.video_id AND item.type = 'video'
+    WHERE c.embedding IS NOT NULL
+      AND c.video_id = ANY(%(video_ids)s)
+    ORDER BY c.embedding <=> %(query)s
+    LIMIT %(top_k)s
+"""
+
+
+def _passages(rows):
+    return [
+        Passage(
+            chunk_id=row[0], video_id=row[1], video_title=row[2], text=row[3],
+            start_ts=row[4], end_ts=row[5], distance=float(row[6]),
+        )
+        for row in rows
+    ]
+
 
 def search(conn, query_embedding, top_k=None, video_id=None):
     """Nearest chunks by cosine distance, closest first."""
@@ -67,23 +94,27 @@ def search(conn, query_embedding, top_k=None, video_id=None):
             },
         )
 
-        return [
-            Passage(
-                chunk_id=row[0],
-                video_id=row[1],
-                video_title=row[2],
-                text=row[3],
-                start_ts=row[4],
-                end_ts=row[5],
-                distance=float(row[6]),
-            )
-            for row in cur.fetchall()
-        ]
+        return _passages(cur.fetchall())
 
 
-def by_chunk_ids(conn, chunk_ids, video_id):
-    """Previously cited local context, still hard-scoped to this video."""
-    if not chunk_ids:
+def search_videos(conn, query_embedding, video_ids, top_k=None):
+    """Nearest chunks from an explicit, already-authorized set of videos."""
+
+    if not video_ids:
+        return []
+    settings = get_settings()
+    with conn.cursor() as cur:
+        cur.execute(COURSE_FALLBACK_SQL, {
+            "query": query_embedding,
+            "video_ids": list(video_ids),
+            "top_k": top_k or settings.top_k,
+        })
+        return _passages(cur.fetchall())
+
+
+def by_chunk_ids(conn, chunk_ids, video_ids):
+    """Previously cited context, hard-scoped to authorized course videos."""
+    if not chunk_ids or not video_ids:
         return []
     with conn.cursor() as cur:
         cur.execute(
@@ -93,10 +124,10 @@ def by_chunk_ids(conn, chunk_ids, video_id):
             FROM transcript_chunks AS c
             JOIN course_items AS item
               ON item.id = c.video_id AND item.type = 'video'
-            WHERE c.video_id = %s AND c.id = ANY(%s)
+            WHERE c.video_id = ANY(%s) AND c.id = ANY(%s)
             ORDER BY array_position(%s::bigint[], c.id)
             """,
-            (video_id, list(chunk_ids), list(chunk_ids)),
+            (list(video_ids), list(chunk_ids), list(chunk_ids)),
         )
         return [
             Passage(
