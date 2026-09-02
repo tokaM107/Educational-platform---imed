@@ -102,8 +102,8 @@ class TutorService:
             logger.warning("follow-up contextualization failed; using original: %s", error)
             return question, None
 
-    def ask(self, conn, question, video_id=None, history=None, summary="",
-            continuity_chunk_ids=None):
+    def ask(self, conn, question, video_id=None, accessible_video_ids=None,
+            history=None, summary="", continuity_chunk_ids=None):
         question = (question or "").strip()
         if not question:
             return TutorAnswer(answer=prompts.NOT_IN_LECTURE, grounded=False)
@@ -112,13 +112,23 @@ class TutorService:
         query_embedding = query_cache.embed_query(
             conn, self.embedder, standalone, commit=False
         )
+        scope = list(dict.fromkeys(accessible_video_ids or [video_id]))
+        if video_id not in scope:
+            scope.insert(0, video_id)
+
         candidates = retrieval.keep_relevant(retrieval.search(
             conn, query_embedding,
             top_k=self.settings.chat_retrieval_candidate_limit,
             video_id=video_id,
         ))
+        fallback_ids = [item for item in scope if item != video_id]
+        if not candidates and fallback_ids:
+            candidates = retrieval.keep_relevant(retrieval.search_videos(
+                conn, query_embedding, fallback_ids,
+                top_k=self.settings.chat_retrieval_candidate_limit,
+            ))
         continuity = retrieval.by_chunk_ids(
-            conn, list(continuity_chunk_ids or [])[:3], video_id
+            conn, list(continuity_chunk_ids or [])[:3], scope
         )
         rewrite_input = rewrite_usage.input_tokens if rewrite_usage else None
         rewrite_output = rewrite_usage.output_tokens if rewrite_usage else None
@@ -228,7 +238,7 @@ class TutorService:
                     history_pairs = history_pairs[remove:]
                 elif any(item.chunk_id not in fresh_ids for item in passages):
                     # Previous-answer continuity is lower priority than the new
-                    # lecture-scoped retrieval.
+                    # authorized course-scoped retrieval.
                     for index in range(len(passages) - 1, -1, -1):
                         if passages[index].chunk_id not in fresh_ids:
                             passages.pop(index)
@@ -298,9 +308,12 @@ class TutorService:
             )
 
         used = self._used_passages(passages, reply.used_excerpts)
+        notice = None
+        if any(passage.video_id != video_id for passage in used):
+            notice = "الإجابة دي من فيديو تاني مرتبط بنفس الكورس."
         return TutorAnswer(
             answer=reply.answer, grounded=True, passages=used,
-            segments=retrieval.to_segments(used), **common,
+            segments=retrieval.to_segments(used), notice=notice, **common,
         )
 
     @staticmethod
