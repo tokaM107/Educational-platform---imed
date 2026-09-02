@@ -130,18 +130,17 @@ def create_chat_session(data: ChatSessionCreate, conn=Depends(get_conn),
                         current_user=Depends(require_student)):
     student_id = current_user["id"]
     _require_lecture_access(conn, student_id, data.lecture_id)
-    title = data.title.strip() if data.title and data.title.strip() else None
     with conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO chat_sessions (student_id, lecture_id, title)
-            VALUES (%s, %s, %s)
-            RETURNING id, student_id, lecture_id, title, created_at, updated_at,
+            INSERT INTO chat_sessions (student_id, lecture_id)
+            VALUES (%s, %s)
+            RETURNING id, student_id, lecture_id, created_at, updated_at,
                       summary_token_count
-        """, (student_id, data.lecture_id, title))
+        """, (student_id, data.lecture_id))
         row = cur.fetchone()
     conn.commit()
-    return ChatSession(id=row[0], student_id=row[1], lecture_id=row[2], title=row[3],
-                       created_at=row[4], updated_at=row[5], summary_token_count=row[6])
+    return ChatSession(id=row[0], student_id=row[1], lecture_id=row[2],
+                       created_at=row[3], updated_at=row[4], summary_token_count=row[5])
 
 
 @router.get("/chat/sessions", response_model=list[ChatSession])
@@ -151,7 +150,7 @@ def list_chat_sessions(lecture_id: int | None = None,
                        current_user=Depends(require_student)):
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT id, student_id, lecture_id, title, created_at, updated_at,
+            SELECT id, student_id, lecture_id, created_at, updated_at,
                    summary_token_count
             FROM chat_sessions
             WHERE student_id = %s AND (%s::int IS NULL OR lecture_id = %s)
@@ -159,9 +158,9 @@ def list_chat_sessions(lecture_id: int | None = None,
             LIMIT %s OFFSET %s
         """, (current_user["id"], lecture_id, lecture_id, limit, offset))
         rows = cur.fetchall()
-    return [ChatSession(id=row[0], student_id=row[1], lecture_id=row[2], title=row[3],
-                        created_at=row[4], updated_at=row[5],
-                        summary_token_count=row[6]) for row in rows]
+    return [ChatSession(id=row[0], student_id=row[1], lecture_id=row[2],
+                        created_at=row[3], updated_at=row[4],
+                        summary_token_count=row[5]) for row in rows]
 
 
 @router.get("/chat/sessions/{session_id}/messages",
