@@ -66,6 +66,9 @@ def test_api_chat_never_imports_or_contacts_huggingface_for_counting(monkeypatch
     monkeypatch.setattr(
         chat.subscriptions, "can_watch_video", lambda *args: (True, 7, "Anatomy")
     )
+    monkeypatch.setattr(
+        chat.subscriptions, "accessible_course_video_ids", lambda *args, **kwargs: [1]
+    )
     passage = Passage(
         chunk_id=9,
         video_id=1,
@@ -149,6 +152,9 @@ def test_exact_count_failure_returns_controlled_503(monkeypatch):
 
     monkeypatch.setattr(
         chat.subscriptions, "can_watch_video", lambda *args: (True, 7, "Anatomy")
+    )
+    monkeypatch.setattr(
+        chat.subscriptions, "accessible_course_video_ids", lambda *args, **kwargs: [1]
     )
 
     passage = Passage(
