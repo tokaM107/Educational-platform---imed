@@ -32,6 +32,10 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
+    # Authentication is a deployment boundary, not an optional feature. Refuse
+    # to start before accepting traffic if the shared Nest user-token secret is
+    # absent or too short.
+    settings.require_nest_jwt_access_secret()
     open_pool()
 
     yield
