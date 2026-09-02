@@ -289,7 +289,7 @@ def test_a_valid_nest_student_token_reaches_tutor_sessions(
 
     conn.answer = answer
     response = client.get(
-        "/api/chat/sessions?lecture_id=7",
+        "/api/chat/sessions?video_id=7",
         headers={"Authorization": f"Bearer {token}"},
     )
 
