@@ -273,8 +273,8 @@ To run the API without the demo UI:
 uvicorn app.main:app --reload
 ```
 
-All endpoints below require `Authorization: Bearer <supabase access token>`;
-only `/health` and the login route are public.
+Endpoints below require `Authorization: Bearer <supabase access token>` unless
+their description says public. `/health` is also public.
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -284,8 +284,10 @@ only `/health` and the login route are public.
 | `POST /api/auth/password/forgot` | email a six-digit recovery code (public) |
 | `POST /api/auth/password/reset` | check the code, set a new password (public) |
 | `GET /api/auth/me` | the application user behind the token |
+| `POST /api/search` | public, unlimited catalog-only AI search |
+| `GET /api/search/cases` | public search-assistant sample prompts |
 | `POST /api/chat` | question → grounded answer + video segments + citations |
-| `POST /api/chat/sessions` | create the authenticated student's lecture-scoped thread |
+| `POST /api/chat/sessions` | create a thread from `lecture_id`; student identity comes from authentication |
 | `GET /api/chat/sessions` | paginate the caller's threads, optionally by lecture |
 | `GET /api/chat/sessions/{session_id}/messages` | paginate the caller's stored messages in stable order |
 | `POST /api/chat/sessions/{session_id}/messages` | idempotently generate and persist a contextualized grounded turn |
