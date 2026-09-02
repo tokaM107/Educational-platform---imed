@@ -1,4 +1,4 @@
-"""Smart Search Assistant: one sentence in, one link out.
+"""Smart Search Assistant: one sentence in, safe catalog results out.
 
 Two stages, both living in search-assistant/ so they can be run and tested on
 their own: `extract_info` turns the sentence into a plan, `search` runs that plan
@@ -16,7 +16,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends
 
-from app.api.deps import get_conn, get_current_user, search_llm_quota
+from app.api.deps import get_conn
 from app.schemas.search import SearchRequest, SearchResponse
 
 
@@ -52,14 +52,11 @@ router = APIRouter(
 def smart_search(
     data: SearchRequest,
     conn=Depends(get_conn),
-    current_user=Depends(get_current_user),
-    _quota=Depends(search_llm_quota),
 ):
-    """Read the question, run the catalog search, say where to go.
+    """Read the question and search the public catalog boundary.
 
-    Authenticated because it calls the model on every query. The catalog it
-    returns is not secret, but an open endpoint that costs money per request is
-    a bill waiting to be run up by someone who is not a student.
+    This endpoint is intentionally public and unmetered. Its server-owned query
+    map still limits results to public catalog metadata.
 
     Never raises on a bad question: an unreachable model comes back as
     `outcome: "error"` with the reason, because a search box that throws a 500
@@ -79,7 +76,7 @@ def smart_search(
 
 
 @router.get("/search/cases")
-def sample_cases(current_user=Depends(get_current_user)):
+def sample_cases():
     """The queries on the test page.
 
     Served from search-assistant/cases.py rather than copied into the page, so
