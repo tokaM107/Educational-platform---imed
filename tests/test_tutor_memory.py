@@ -142,6 +142,71 @@ def test_missing_evidence_returns_safe_answer_without_answer_generation(rag, mon
     assert len(model.calls) == 1
 
 
+def test_missing_current_video_evidence_falls_back_to_same_course(monkeypatch):
+    source = Passage(
+        22, 8, "Earlier video", "The linked explanation is here.", 40, 55, .2
+    )
+    calls = []
+    monkeypatch.setattr(
+        "app.services.tutor.query_cache.embed_query",
+        lambda *args, **kwargs: [0, 0, 0],
+    )
+    monkeypatch.setattr(
+        "app.services.tutor.retrieval.search",
+        lambda conn, embedding, top_k, video_id: calls.append(
+            ("current", video_id)
+        ) or [],
+    )
+    monkeypatch.setattr(
+        "app.services.tutor.retrieval.search_videos",
+        lambda conn, embedding, video_ids, top_k: calls.append(
+            ("fallback", list(video_ids))
+        ) or [source],
+    )
+    monkeypatch.setattr(
+        "app.services.tutor.retrieval.by_chunk_ids", lambda *args, **kwargs: []
+    )
+    model = Model([
+        generated(prompts.StandaloneQueryReply(standalone_query="linked topic")),
+        generated(prompts.TutorReply(
+            found=True, answer="It was covered earlier [1]", used_excerpts=[1]
+        )),
+    ])
+
+    result = TutorService(
+        SimpleNamespace(), model, settings(), Counter()
+    ).ask(None, "Where was this explained?", video_id=7,
+          accessible_video_ids=[7, 8])
+
+    assert calls == [("current", 7), ("fallback", [8])]
+    assert result.grounded is True
+    assert result.passages[0].video_id == 8
+    assert result.segments[0].video_id == 8
+    assert result.notice is not None
+
+
+def test_current_video_evidence_prevents_course_fallback(rag, monkeypatch):
+    fallback_calls = []
+    monkeypatch.setattr(
+        "app.services.tutor.retrieval.search_videos",
+        lambda *args, **kwargs: fallback_calls.append(True) or [],
+    )
+    model = Model([
+        generated(prompts.StandaloneQueryReply(standalone_query="current topic")),
+        generated(prompts.TutorReply(
+            found=True, answer="Current answer [1]", used_excerpts=[1]
+        )),
+    ])
+
+    result = TutorService(
+        SimpleNamespace(), model, settings(), Counter()
+    ).ask(None, "Explain this", video_id=7, accessible_video_ids=[7, 8])
+
+    assert result.grounded is True
+    assert result.passages[0].video_id == 7
+    assert fallback_calls == []
+
+
 def test_summary_is_context_only_and_never_transcript_evidence(rag):
     model = Model([
         generated(prompts.StandaloneQueryReply(standalone_query="Why X?")),
