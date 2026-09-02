@@ -69,14 +69,22 @@ def client_for(api, conn, user=STUDENT, tutor=None):
 
 def test_student_creates_session_from_jwt_identity(api):
     conn = FakeConn(lambda sql, params: [
-        (SESSION_ID, STUDENT["id"], 7, "Revision", NOW, NOW, 0)
+        (SESSION_ID, STUDENT["id"], 7, NOW, NOW, 0)
     ] if "INSERT INTO chat_sessions" in sql else [])
     response = client_for(api, conn).post(
-        "/api/chat/sessions", json={"lecture_id": 7, "title": "  Revision  "})
+        "/api/chat/sessions", json={"lecture_id": 7})
     assert response.status_code == 201
     assert response.json()["student_id"] == STUDENT["id"]
-    assert conn.params_for("INSERT INTO chat_sessions") == (2, 7, "Revision")
+    assert response.json()["lecture_id"] == 7
+    assert "title" not in response.json()
+    assert conn.params_for("INSERT INTO chat_sessions") == (2, 7)
     assert conn.committed == 1
+
+
+def test_session_body_rejects_title(api):
+    response = client_for(api, FakeConn()).post(
+        "/api/chat/sessions", json={"lecture_id": 7, "title": "Revision"})
+    assert response.status_code == 422
 
 
 def test_session_body_rejects_caller_supplied_user_id(api):
@@ -101,11 +109,12 @@ def test_inaccessible_lecture_is_rejected(api, monkeypatch):
 
 def test_sessions_are_paginated_and_scoped_to_student_and_lecture(api):
     conn = FakeConn(lambda sql, params: [
-        (SESSION_ID, 2, 7, None, NOW, NOW, 0)
+        (SESSION_ID, 2, 7, NOW, NOW, 0)
     ] if "FROM chat_sessions" in sql else [])
     response = client_for(api, conn).get(
         "/api/chat/sessions?lecture_id=7&limit=10&offset=20")
     assert response.status_code == 200
+    assert "title" not in response.json()[0]
     assert conn.params_for("ORDER BY updated_at") == (2, 7, 7, 10, 20)
 
 
