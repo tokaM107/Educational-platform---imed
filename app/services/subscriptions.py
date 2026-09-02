@@ -39,6 +39,13 @@ ACCESS_SQL = """
 
 LECTURE_DOCTOR_SQL = "SELECT doctor_id, title FROM lectures WHERE id = %s"
 
+VIDEO_DOCTOR_SQL = """
+    SELECT c.doctor_id, item.title, item.is_preview
+    FROM course_items AS item
+    JOIN courses AS c ON c.id = item.course_id
+    WHERE item.id = %s AND item.type = 'video'
+"""
+
 COURSE_DOCTOR_SQL = "SELECT doctor_id, title FROM courses WHERE id = %s"
 
 
@@ -71,6 +78,23 @@ def can_watch(conn, student_id, lecture_id):
     doctor_id, title = row
 
     if student_id is not None and int(student_id) == doctor_id:
+        return True, doctor_id, title
+
+    return has_access(conn, student_id, doctor_id), doctor_id, title
+
+
+def can_watch_video(conn, student_id, video_id):
+    """(allowed, doctor_id, video_title) for one course-item video."""
+
+    with conn.cursor() as cur:
+        cur.execute(VIDEO_DOCTOR_SQL, (video_id,))
+        row = cur.fetchone()
+
+    if row is None:
+        return False, None, None
+
+    doctor_id, title, is_preview = row
+    if is_preview or (student_id is not None and int(student_id) == doctor_id):
         return True, doctor_id, title
 
     return has_access(conn, student_id, doctor_id), doctor_id, title
