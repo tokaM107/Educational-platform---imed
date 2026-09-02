@@ -1,9 +1,9 @@
-"""Verifying a Supabase access token.
+"""Verifying access tokens issued by Supabase or the platform's Nest API.
 
-Supabase Auth owns everything about credentials — password hashing, sign-in,
-JWT issuance, sessions, refresh, email verification, recovery. This module does
-the one thing left to us: decide whether a token presented to *our* API is
-genuine. It never mints a token and never sees a password.
+Supabase Auth still owns its credentials and sessions. Nest also issues access
+tokens for the main application. This module decides whether either token was
+issued by the expected authority; it never mints a token and never sees a
+password.
 
 `supabase.auth.get_claims` does the verification. Given this project's ES256
 signing keys it works entirely locally: it reads the `kid` from the token
@@ -13,7 +13,9 @@ round trip per request. (Were the project on a legacy HS256 shared secret, the
 same call would fall back to asking the Auth server about every token — worth
 knowing if verification ever suddenly gets slow.)
 
-Expiry is checked before the signature, by the same call.
+Nest tokens are verified locally with the same server-only HS256 user-token
+secret used by Nest. Their algorithm and ``user`` audience are pinned here;
+admin tokens and tokens signed with another algorithm are never candidates.
 
 What comes back is the token's claims, and it is worth being clear about one of
 them: Supabase's `role` claim holds a *Postgres* role, normally "authenticated".
@@ -22,15 +24,30 @@ and is read from there. Treating the token's role as the application's would
 hand every logged-in user the same permissions.
 """
 
+from dataclasses import dataclass
+from typing import Literal
+
+import jwt
+
+from app.config import get_settings
 from app.services.supabase_client import SUPABASE_URL, supabase
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedIdentity:
+    """The trusted identity selected by one successful token verifier."""
+
+    source: Literal["supabase", "nest"]
+    subject: str | int
+    role: str | None = None
 
 
 class InvalidToken(Exception):
     """A token that was malformed, expired, or not signed by our project."""
 
 
-def decode_access_token(token: str) -> dict:
-    """The verified claims of a Supabase access token, or InvalidToken.
+def decode_access_token(token: str) -> VerifiedIdentity:
+    """A verified Supabase or Nest identity, or ``InvalidToken``.
 
     Every failure collapses into one exception on purpose. Expired, forged and
     malformed are different to us and identical to the caller — they are not
@@ -43,7 +60,64 @@ def decode_access_token(token: str) -> dict:
     """
 
     if not token:
-        raise InvalidToken("No token")
+        raise InvalidToken("Invalid token")
+
+    try:
+        algorithm = jwt.get_unverified_header(token).get("alg")
+    except Exception as exc:
+        raise InvalidToken("Invalid token") from exc
+
+    if algorithm == "HS256":
+        return _decode_nest_access_token(token)
+
+    if algorithm == "ES256":
+        return _decode_supabase_access_token(token)
+
+    raise InvalidToken("Invalid token")
+
+
+def _decode_nest_access_token(token: str) -> VerifiedIdentity:
+    """Verify the fixed contract used by Nest's user access tokens."""
+
+    try:
+        claims = jwt.decode(
+            token,
+            get_settings().require_nest_jwt_access_secret(),
+            algorithms=["HS256"],
+            audience="user",
+            options={"require": ["sub", "exp", "aud", "role", "email"]},
+        )
+
+        raw_subject = claims.get("sub")
+        if isinstance(raw_subject, bool) or not isinstance(raw_subject, (str, int)):
+            raise InvalidToken("Invalid token")
+
+        subject = int(raw_subject)
+        if subject <= 0 or str(subject) != str(raw_subject):
+            raise InvalidToken("Invalid token")
+
+        role = claims.get("role")
+        if role not in ("student", "doctor"):
+            raise InvalidToken("Invalid token")
+
+        email = claims.get("email")
+        if not isinstance(email, str) or not email.strip():
+            raise InvalidToken("Invalid token")
+
+        if claims.get("aud") != "user":
+            raise InvalidToken("Invalid token")
+
+        return VerifiedIdentity(source="nest", subject=subject, role=role)
+
+    except InvalidToken:
+        raise
+
+    except Exception as exc:
+        raise InvalidToken("Invalid token") from exc
+
+
+def _decode_supabase_access_token(token: str) -> VerifiedIdentity:
+    """Verify an ES256 Supabase token against the project's JWKS."""
 
     try:
         # ClaimsResponse is a TypedDict, so this is a plain dict at runtime and
@@ -53,12 +127,13 @@ def decode_access_token(token: str) -> dict:
         response = supabase.auth.get_claims(token)
         claims = (response or {}).get("claims") or {}
 
-        if not claims.get("sub"):
+        subject = claims.get("sub")
+        if not isinstance(subject, str) or not subject:
             raise InvalidToken("Token carries no subject")
 
         _check_issuer(claims)
 
-        return claims
+        return VerifiedIdentity(source="supabase", subject=subject)
 
     except InvalidToken:
         raise
