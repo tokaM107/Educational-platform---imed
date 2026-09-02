@@ -301,6 +301,12 @@ their description says public. `/health` is also public.
 | `GET /api/notifications` | the caller's inbox, with the unread count |
 | `POST /api/notifications/{id}/read` | mark one read |
 
+Chat retrieval searches the opened video's transcript first. If it finds no
+relevant evidence, it searches only transcripts from videos in the same course
+that the caller may access. Citations and playback segments always identify the
+video that actually supplied the answer; preview access never exposes paid
+sibling videos.
+
 ```bash
 TOKEN=$(curl -s localhost:8000/api/auth/login -H 'Content-Type: application/json' \
   -d '{"email":"you@example.com","password":"…"}' | python -c 'import json,sys;print(json.load(sys.stdin)["access_token"])')
