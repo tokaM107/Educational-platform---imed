@@ -10,8 +10,8 @@ class Passage:
     """One retrieved transcript chunk."""
 
     chunk_id: int
-    lecture_id: int
-    lecture_title: str
+    video_id: int
+    video_title: str
     text: str
     start_ts: int
     end_ts: int
@@ -26,8 +26,8 @@ class Segment:
     Playback is never stopped there — the flag is only a marker.
     """
 
-    lecture_id: int
-    lecture_title: str
+    video_id: int
+    video_title: str
     start_ts: int
     end_ts: int
     distance: float
@@ -36,22 +36,22 @@ class Segment:
 SEARCH_SQL = """
     SELECT
         c.id,
-        c.lecture_id,
-        l.title,
+        c.video_id,
+        item.title,
         c.text,
         c.start_ts,
         c.end_ts,
         c.embedding <=> %(query)s AS distance
     FROM transcript_chunks AS c
-    JOIN lectures AS l ON l.id = c.lecture_id
+    JOIN course_items AS item ON item.id = c.video_id AND item.type = 'video'
     WHERE c.embedding IS NOT NULL
-      AND (%(lecture_id)s::int IS NULL OR c.lecture_id = %(lecture_id)s)
+      AND (%(video_id)s::int IS NULL OR c.video_id = %(video_id)s)
     ORDER BY c.embedding <=> %(query)s
     LIMIT %(top_k)s
 """
 
 
-def search(conn, query_embedding, top_k=None, lecture_id=None):
+def search(conn, query_embedding, top_k=None, video_id=None):
     """Nearest chunks by cosine distance, closest first."""
 
     settings = get_settings()
@@ -62,7 +62,7 @@ def search(conn, query_embedding, top_k=None, lecture_id=None):
             SEARCH_SQL,
             {
                 "query": query_embedding,
-                "lecture_id": lecture_id,
+                "video_id": video_id,
                 "top_k": top_k or settings.top_k,
             },
         )
@@ -70,8 +70,8 @@ def search(conn, query_embedding, top_k=None, lecture_id=None):
         return [
             Passage(
                 chunk_id=row[0],
-                lecture_id=row[1],
-                lecture_title=row[2],
+                video_id=row[1],
+                video_title=row[2],
                 text=row[3],
                 start_ts=row[4],
                 end_ts=row[5],
@@ -81,25 +81,26 @@ def search(conn, query_embedding, top_k=None, lecture_id=None):
         ]
 
 
-def by_chunk_ids(conn, chunk_ids, lecture_id):
-    """Previously cited local context, still hard-scoped to this lecture."""
+def by_chunk_ids(conn, chunk_ids, video_id):
+    """Previously cited local context, still hard-scoped to this video."""
     if not chunk_ids:
         return []
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT c.id, c.lecture_id, l.title, c.text,
+            SELECT c.id, c.video_id, item.title, c.text,
                    c.start_ts, c.end_ts, 0.0 AS distance
             FROM transcript_chunks AS c
-            JOIN lectures AS l ON l.id = c.lecture_id
-            WHERE c.lecture_id = %s AND c.id = ANY(%s)
+            JOIN course_items AS item
+              ON item.id = c.video_id AND item.type = 'video'
+            WHERE c.video_id = %s AND c.id = ANY(%s)
             ORDER BY array_position(%s::bigint[], c.id)
             """,
-            (lecture_id, list(chunk_ids), list(chunk_ids)),
+            (video_id, list(chunk_ids), list(chunk_ids)),
         )
         return [
             Passage(
-                chunk_id=row[0], lecture_id=row[1], lecture_title=row[2],
+                chunk_id=row[0], video_id=row[1], video_title=row[2],
                 text=row[3], start_ts=row[4], end_ts=row[5], distance=float(row[6]),
             )
             for row in cur.fetchall()
@@ -130,14 +131,14 @@ def to_segments(passages, merge_gap=None, lead_in=None):
 
     segments = []
 
-    for passage in sorted(passages, key=lambda item: (item.lecture_id, item.start_ts)):
+    for passage in sorted(passages, key=lambda item: (item.video_id, item.start_ts)):
 
         merged = None
 
         for segment in segments:
 
             if (
-                segment.lecture_id == passage.lecture_id
+                segment.video_id == passage.video_id
                 and passage.start_ts <= segment.end_ts + gap
                 and passage.end_ts >= segment.start_ts - gap
             ):
@@ -148,8 +149,8 @@ def to_segments(passages, merge_gap=None, lead_in=None):
 
             segments.append(
                 Segment(
-                    lecture_id=passage.lecture_id,
-                    lecture_title=passage.lecture_title,
+                    video_id=passage.video_id,
+                    video_title=passage.video_title,
                     start_ts=passage.start_ts,
                     end_ts=passage.end_ts,
                     distance=passage.distance,
