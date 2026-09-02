@@ -17,8 +17,8 @@ class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     message: str = Field(min_length=1)
 
-    # Optional: keep the search inside one lecture
-    lecture_id: int | None = None
+    # Every answer is grounded in one course-item video.
+    video_id: int
 
     # Previous turns, oldest first — the demo UI sends the last few
     history: list[ChatMessage] = Field(default_factory=list)
@@ -31,8 +31,8 @@ class VideoSegment(BaseModel):
     the student can keep watching straight past the flag.
     """
 
-    lecture_id: int
-    lecture_title: str
+    video_id: int
+    video_title: str
     video_url: str
     start_ts: int
     end_ts: int
@@ -45,7 +45,7 @@ class Citation(BaseModel):
 
     index: int
     chunk_id: int
-    lecture_id: int
+    video_id: int
     start_ts: int
     end_ts: int
     text: str
@@ -53,16 +53,16 @@ class Citation(BaseModel):
 
 
 class ChatSessionCreate(BaseModel):
-    """Start a thread for one lecture; the JWT supplies the student."""
+    """Start a thread for one course-item video; JWT supplies the student."""
 
     model_config = ConfigDict(extra="forbid")
-    lecture_id: int
+    video_id: int
 
 
 class ChatSession(BaseModel):
     id: UUID
     student_id: int
-    lecture_id: int
+    video_id: int
     created_at: datetime
     updated_at: datetime
     summary_token_count: int = 0
