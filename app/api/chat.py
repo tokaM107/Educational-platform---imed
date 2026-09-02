@@ -48,9 +48,9 @@ def _default_counter():
 
 def _segments(result):
     return [VideoSegment(
-        lecture_id=segment.lecture_id,
-        lecture_title=segment.lecture_title,
-        video_url=f"/api/lectures/{segment.lecture_id}/video",
+        video_id=segment.video_id,
+        video_title=segment.video_title,
+        video_url=f"/api/videos/{segment.video_id}/video",
         start_ts=segment.start_ts, end_ts=segment.end_ts,
         start_label=to_stamp(segment.start_ts), end_label=to_stamp(segment.end_ts),
     ) for segment in result.segments]
@@ -58,7 +58,7 @@ def _segments(result):
 
 def _citations(result):
     return [Citation(
-        index=index, chunk_id=passage.chunk_id, lecture_id=passage.lecture_id,
+        index=index, chunk_id=passage.chunk_id, video_id=passage.video_id,
         start_ts=passage.start_ts, end_ts=passage.end_ts, text=passage.text,
         distance=round(passage.distance, 4),
     ) for index, passage in enumerate(result.passages, start=1)]
@@ -75,15 +75,17 @@ def _stored_message(row):
     )
 
 
-def _require_lecture_access(conn, student_id, lecture_id):
-    allowed, doctor_id, title = subscriptions.can_watch(conn, student_id, lecture_id)
+def _require_video_access(conn, student_id, video_id):
+    allowed, doctor_id, title = subscriptions.can_watch_video(
+        conn, student_id, video_id
+    )
     if doctor_id is None:
-        raise HTTPException(status_code=404, detail="Lecture not found")
+        raise HTTPException(status_code=404, detail="Video not found")
     if get_settings().enforce_subscriptions and not allowed:
         raise HTTPException(status_code=402, detail={
             "error": "subscription_required",
             "message": "محتاج تشترك مع المحاضر عشان تستخدم مساعد المحاضرة.",
-            "lecture_id": lecture_id, "lecture_title": title, "doctor_id": doctor_id,
+            "video_id": video_id, "video_title": title, "doctor_id": doctor_id,
         })
     return title
 
@@ -129,36 +131,37 @@ def _turn_response(user_message, assistant_message, segments=None, notice=None,
 def create_chat_session(data: ChatSessionCreate, conn=Depends(get_conn),
                         current_user=Depends(require_student)):
     student_id = current_user["id"]
-    _require_lecture_access(conn, student_id, data.lecture_id)
+    _require_video_access(conn, student_id, data.video_id)
     with conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO chat_sessions (student_id, lecture_id)
+            INSERT INTO chat_sessions (student_id, video_id)
             VALUES (%s, %s)
-            RETURNING id, student_id, lecture_id, created_at, updated_at,
+            RETURNING id, student_id, video_id, created_at, updated_at,
                       summary_token_count
-        """, (student_id, data.lecture_id))
+        """, (student_id, data.video_id))
         row = cur.fetchone()
     conn.commit()
-    return ChatSession(id=row[0], student_id=row[1], lecture_id=row[2],
+    return ChatSession(id=row[0], student_id=row[1], video_id=row[2],
                        created_at=row[3], updated_at=row[4], summary_token_count=row[5])
 
 
 @router.get("/chat/sessions", response_model=list[ChatSession])
-def list_chat_sessions(lecture_id: int | None = None,
+def list_chat_sessions(video_id: int | None = None,
                        limit: int = Query(20, ge=1, le=100),
                        offset: int = Query(0, ge=0), conn=Depends(get_conn),
                        current_user=Depends(require_student)):
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT id, student_id, lecture_id, created_at, updated_at,
+            SELECT id, student_id, video_id, created_at, updated_at,
                    summary_token_count
             FROM chat_sessions
-            WHERE student_id = %s AND (%s::int IS NULL OR lecture_id = %s)
+            WHERE student_id = %s AND video_id IS NOT NULL
+              AND (%s::int IS NULL OR video_id = %s)
             ORDER BY updated_at DESC, id DESC
             LIMIT %s OFFSET %s
-        """, (current_user["id"], lecture_id, lecture_id, limit, offset))
+        """, (current_user["id"], video_id, video_id, limit, offset))
         rows = cur.fetchall()
-    return [ChatSession(id=row[0], student_id=row[1], lecture_id=row[2],
+    return [ChatSession(id=row[0], student_id=row[1], video_id=row[2],
                         created_at=row[3], updated_at=row[4],
                         summary_token_count=row[5]) for row in rows]
 
@@ -169,12 +172,12 @@ def get_chat_messages(session_id: UUID, limit: int = Query(50, ge=1, le=200),
                       offset: int = Query(0, ge=0), conn=Depends(get_conn),
                       current_user=Depends(require_student)):
     with conn.cursor() as cur:
-        cur.execute("SELECT lecture_id FROM chat_sessions WHERE id = %s AND student_id = %s",
+        cur.execute("SELECT video_id FROM chat_sessions WHERE id = %s AND student_id = %s",
                     (session_id, current_user["id"]))
         session = cur.fetchone()
         if session is None:
             raise HTTPException(status_code=404, detail="Chat session not found")
-        _require_lecture_access(conn, current_user["id"], session[0])
+        _require_video_access(conn, current_user["id"], session[0])
         cur.execute(f"""
             SELECT {MESSAGE_COLUMNS} FROM chat_messages
             WHERE session_id = %s ORDER BY message_order
@@ -286,15 +289,15 @@ def create_chat_message(session_id: UUID, data: ChatMessageCreate,
         cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                     (str(session_id),))
         cur.execute("""
-            SELECT lecture_id, memory_summary, summarized_until_message_order,
+            SELECT video_id, memory_summary, summarized_until_message_order,
                    next_message_order
             FROM chat_sessions WHERE id = %s AND student_id = %s FOR UPDATE
         """, (session_id, current_user["id"]))
         session = cur.fetchone()
         if session is None:
             raise HTTPException(status_code=404, detail="Chat session not found")
-        lecture_id, summary, checkpoint, next_order = session
-        lecture_title = _require_lecture_access(conn, current_user["id"], lecture_id)
+        video_id, summary, checkpoint, next_order = session
+        video_title = _require_video_access(conn, current_user["id"], video_id)
 
         cur.execute("""
             SELECT id, content FROM chat_messages
@@ -321,8 +324,8 @@ def create_chat_message(session_id: UUID, data: ChatMessageCreate,
                 })
             assistant_message = _stored_message(assistant_row)
             restored_passages = [retrieval.Passage(
-                chunk_id=item.chunk_id, lecture_id=item.lecture_id,
-                lecture_title=lecture_title, text=item.text,
+                chunk_id=item.chunk_id, video_id=item.video_id,
+                video_title=video_title, text=item.text,
                 start_ts=item.start_ts, end_ts=item.end_ts,
                 distance=item.distance,
             ) for item in (assistant_message.citations or [])]
@@ -363,7 +366,7 @@ def create_chat_message(session_id: UUID, data: ChatMessageCreate,
     started_at = time.monotonic()
     try:
         result = tutor.ask(
-            conn, question=data.content, lecture_id=lecture_id, history=history,
+            conn, question=data.content, video_id=video_id, history=history,
             summary=bound_text(summary, settings.chat_summary_tokens, counter),
             continuity_chunk_ids=continuity_ids,
         )
@@ -451,9 +454,10 @@ def create_chat_message(session_id: UUID, data: ChatMessageCreate,
 def chat(data: ChatRequest, conn=Depends(get_conn), tutor=Depends(get_tutor),
          current_user=Depends(get_current_user),
          _quota=Depends(chat_llm_quota)):
+    _require_video_access(conn, current_user["id"], data.video_id)
     try:
         result = tutor.ask(
-            conn, question=data.message, lecture_id=data.lecture_id,
+            conn, question=data.message, video_id=data.video_id,
             history=[(message.role, message.content) for message in data.history],
         )
     except ExactTokenCountUnavailable as error:
