@@ -44,7 +44,7 @@ def consume(conn, user_id, feature, *, limit=10, units=1):
                     %s,
                     (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date,
                     %s,
-                    jsonb_build_object(%s, %s)
+                    jsonb_build_object(%s::text, %s)
                 )
             ON CONFLICT (user_id, usage_date) DO UPDATE
             SET
