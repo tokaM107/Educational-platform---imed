@@ -220,9 +220,9 @@ def logout(data: LogoutRequest, current_user=Depends(get_current_user)):
 def me(current_user=Depends(get_current_user)):
     """The application user behind the presented token.
 
-    The whole identity chain in one response: Supabase verified the token,
-    `auth_user_id` mapped its subject onto a public.users row, and this is that
-    row — the integer id every domain table has always keyed on.
+    The whole identity chain in one response: an accepted issuer verified the
+    token, its source selected the UUID or integer lookup, and this is the
+    public.users row every domain table has always keyed on.
     """
 
     return current_user
