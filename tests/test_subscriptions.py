@@ -73,6 +73,32 @@ def test_an_unknown_lecture_is_refused_rather_than_allowed():
     assert (allowed, doctor_id, title) == (False, None, None)
 
 
+def test_a_subscribed_student_may_watch_a_course_item_video():
+    allowed, doctor_id, title = subscriptions.can_watch_video(
+        FakeConn([(7, "Anatomy video", False), (True,)]),
+        student_id=3,
+        video_id=11,
+    )
+
+    assert (allowed, doctor_id, title) == (True, 7, "Anatomy video")
+
+
+def test_a_preview_video_does_not_require_a_subscription():
+    allowed, doctor_id, title = subscriptions.can_watch_video(
+        FakeConn([(7, "Preview", True)]), student_id=3, video_id=11
+    )
+
+    assert (allowed, doctor_id, title) == (True, 7, "Preview")
+
+
+def test_a_non_video_course_item_is_not_accepted_as_a_video():
+    allowed, doctor_id, title = subscriptions.can_watch_video(
+        FakeConn([None]), student_id=3, video_id=12
+    )
+
+    assert (allowed, doctor_id, title) == (False, None, None)
+
+
 def test_an_anonymous_viewer_has_no_access():
     """No identity, no entitlement — the check cannot be skipped by omission."""
 
