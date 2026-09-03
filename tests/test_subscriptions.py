@@ -123,6 +123,7 @@ def test_preview_user_can_search_preview_videos_but_not_paid_siblings():
     conn = FakeConn([
         (7, True, 16),
         (False,),
+        (False,),
         (11,),
     ])
 
@@ -134,15 +135,64 @@ def test_preview_user_can_search_preview_videos_but_not_paid_siblings():
     assert conn._cursor.sql[-1][1] == (16, False)
 
 
-def test_paid_video_without_subscription_has_no_transcript_scope():
+def test_paid_video_without_subscription_or_enrolment_has_no_scope():
     video_ids = subscriptions.accessible_course_video_ids(
-        FakeConn([(7, False, 16), (False,)]),
+        FakeConn([(7, False, 16), (False,), (False,)]),
         student_id=3,
         video_id=11,
         enforce_subscriptions=True,
     )
 
     assert video_ids == []
+
+
+def test_a_live_enrolment_admits_a_student_with_no_subscription():
+    """The way2APlus path: access bought with a code writes `enrollments`,
+    never `subscriptions`, and must not read as "not entitled"."""
+
+    allowed, doctor_id, title = subscriptions.can_watch_video(
+        FakeConn([(7, "Anatomy video", False), (False,), (True,)]),
+        student_id=3,
+        video_id=11,
+    )
+
+    assert (allowed, doctor_id, title) == (True, 7, "Anatomy video")
+
+
+def test_an_enrolled_student_can_search_every_video_in_the_course():
+    conn = FakeConn([
+        (7, False, 16),
+        (False,),
+        (True,),
+        (11,),
+        (12,),
+    ])
+
+    video_ids = subscriptions.accessible_course_video_ids(
+        conn, student_id=3, video_id=11, enforce_subscriptions=True
+    )
+
+    assert video_ids == [11, 12]
+    assert conn._cursor.sql[-1][1] == (16, True)
+
+
+def test_a_subscription_short_circuits_the_enrolment_query():
+    """Two entitlements, but the common case must stay one round trip: with
+    only the subscription row available the check still admits."""
+
+    conn = FakeConn([(7, "Anatomy video", False), (True,)])
+
+    allowed, _, _ = subscriptions.can_watch_video(conn, student_id=3, video_id=11)
+
+    assert allowed is True
+    assert len(conn._cursor.sql) == 2
+
+
+def test_an_anonymous_viewer_has_no_enrolment():
+    """Same fail-closed rule as `has_access`: no identity, no entitlement."""
+
+    assert subscriptions.enrolled_in_course(FakeConn([]), None, 16) is False
+    assert subscriptions.enrolled_for_video(FakeConn([]), 3, None) is False
 
 
 def test_an_anonymous_viewer_has_no_access():

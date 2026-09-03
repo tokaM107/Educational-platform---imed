@@ -623,6 +623,21 @@ separate from enrolment because the two change independently: a subscription
 lapses without un-enrolling anybody, and a student subscribed to a teacher may be
 enrolled on none, one or several of that teacher's courses.
 
+**Course-item videos accept a second, independent entitlement: a live
+`enrollments` row.** This is not a convenience — it is the only one the
+way2APlus platform actually issues. Access there is bought with a code, and the
+Nest API writes `enrollments` and never touches `subscriptions`, so a
+subscription-only check refuses every real student on that product. `can_watch_video`
+and `accessible_course_video_ids` therefore admit on *either*, and "live" means
+what Nest means by it — `status = 'active'` and an `expires_at` that is null or
+still in the future. Two systems disagreeing about when access ends would be
+worse than either rule alone.
+
+The subscription is checked first and short-circuits, so the standalone
+product's common case stays a single query. Note the asymmetry: the legacy
+`lectures` path (`can_watch`) is subscription-only, because way2APlus does not
+publish lectures — it publishes `course_items`.
+
 Enforced in two places — `GET /api/lectures/{id}/video` answers **402** without
 one, and `scripts.enroll add` refuses to enrol a student on a course whose
 teacher they do not pay for, so nobody is enrolled on something they cannot open.

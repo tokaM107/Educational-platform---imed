@@ -22,6 +22,22 @@ of their own the day the product needs them:
 Both are honest gaps rather than oversights: the schema was specified as it
 stands, and inventing columns nobody asked for would be worse than naming what
 is missing.
+
+There is a second, independent source of entitlement, and it is the one the
+way2APlus platform actually writes: `enrollments`. That table is filled by
+access-code redemption and admin grants in the Nest API, which never touches
+`subscriptions` at all. A student who bought a course with a code therefore has
+every right to its videos and to the tutor over them, and would be refused by a
+subscription check alone.
+
+So course-item access asks two questions and admits on either: is this student
+subscribed to the teacher, and is their enrolment in this course live. "Live"
+means exactly what Nest means by it — `status = 'active'` and an `expires_at`
+that is null or still in the future — because two systems disagreeing about
+when access ends is worse than either rule on its own.
+
+The subscription is checked first and short-circuits, so the common case for
+the standalone product stays one query.
 """
 
 import logging
@@ -63,6 +79,32 @@ COURSE_VIDEOS_SQL = """
 
 COURSE_DOCTOR_SQL = "SELECT doctor_id, title FROM courses WHERE id = %s"
 
+# `now()` rather than a timestamp passed in from Python: the comparison then
+# happens in the database's clock, which is the same one that stamped the row.
+LIVE_ENROLMENT_PREDICATE = """
+    e.student_id = %s
+      AND e.status = 'active'
+      AND (e.expires_at IS NULL OR e.expires_at > now())
+"""
+
+COURSE_ENROLMENT_SQL = f"""
+    SELECT EXISTS (
+        SELECT 1 FROM enrollments AS e
+        WHERE e.course_id = %s AND {LIVE_ENROLMENT_PREDICATE}
+    )
+"""
+
+# Starts from the video rather than the course so `can_watch_video` does not
+# have to widen its row just to reach the course id.
+VIDEO_ENROLMENT_SQL = f"""
+    SELECT EXISTS (
+        SELECT 1
+        FROM course_items AS item
+        JOIN enrollments AS e ON e.course_id = item.course_id
+        WHERE item.id = %s AND {LIVE_ENROLMENT_PREDICATE}
+    )
+"""
+
 
 def has_access(conn, student_id, doctor_id):
     """Is this student subscribed to this teacher?"""
@@ -73,6 +115,45 @@ def has_access(conn, student_id, doctor_id):
     with conn.cursor() as cur:
         cur.execute(ACCESS_SQL, (student_id, doctor_id))
         return bool(cur.fetchone()[0])
+
+
+def _enrolled(conn, student_id, sql, scope_id):
+    """Shared body of the two live-enrolment checks."""
+
+    if student_id is None or scope_id is None:
+        return False
+
+    with conn.cursor() as cur:
+        cur.execute(sql, (scope_id, student_id))
+        return bool(cur.fetchone()[0])
+
+
+def enrolled_in_course(conn, student_id, course_id):
+    """Does this student hold a live way2APlus enrolment in this course?"""
+
+    return _enrolled(conn, student_id, COURSE_ENROLMENT_SQL, course_id)
+
+
+def enrolled_for_video(conn, student_id, video_id):
+    """Same question, asked from a course-item video instead of a course."""
+
+    return _enrolled(conn, student_id, VIDEO_ENROLMENT_SQL, video_id)
+
+
+def entitled_to_course(conn, student_id, doctor_id, course_id):
+    """Either entitlement is enough. Subscription first: it is one query."""
+
+    return has_access(conn, student_id, doctor_id) or enrolled_in_course(
+        conn, student_id, course_id
+    )
+
+
+def entitled_to_video(conn, student_id, doctor_id, video_id):
+    """`entitled_to_course`, reached from the video's own id."""
+
+    return has_access(conn, student_id, doctor_id) or enrolled_for_video(
+        conn, student_id, video_id
+    )
 
 
 def can_watch(conn, student_id, lecture_id):
@@ -112,7 +193,8 @@ def can_watch_video(conn, student_id, video_id):
     if is_preview or (student_id is not None and int(student_id) == doctor_id):
         return True, doctor_id, title
 
-    return has_access(conn, student_id, doctor_id), doctor_id, title
+    allowed = entitled_to_video(conn, student_id, doctor_id, video_id)
+    return allowed, doctor_id, title
 
 
 def accessible_course_video_ids(
@@ -135,8 +217,10 @@ def accessible_course_video_ids(
 
     doctor_id, is_preview, course_id = row
     owns_content = student_id is not None and int(student_id) == doctor_id
-    subscribed = owns_content or has_access(conn, student_id, doctor_id)
-    include_paid = not enforce_subscriptions or subscribed
+    entitled = owns_content or entitled_to_course(
+        conn, student_id, doctor_id, course_id
+    )
+    include_paid = not enforce_subscriptions or entitled
 
     if enforce_subscriptions and not include_paid and not is_preview:
         return []
