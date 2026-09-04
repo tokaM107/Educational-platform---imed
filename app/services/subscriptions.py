@@ -37,10 +37,20 @@ ACCESS_SQL = """
     )
 """
 
+COURSE_ACCESS_SQL = """
+    SELECT EXISTS (
+        SELECT 1 FROM enrollments
+        WHERE student_id = %s
+          AND course_id = %s
+          AND status = 'active'
+          AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+    )
+"""
+
 LECTURE_DOCTOR_SQL = "SELECT doctor_id, title FROM lectures WHERE id = %s"
 
 VIDEO_DOCTOR_SQL = """
-    SELECT c.doctor_id, item.title, item.is_preview
+    SELECT c.doctor_id, item.title, item.is_preview, item.course_id
     FROM course_items AS item
     JOIN courses AS c ON c.id = item.course_id
     WHERE item.id = %s AND item.type = 'video'
@@ -72,6 +82,17 @@ def has_access(conn, student_id, doctor_id):
 
     with conn.cursor() as cur:
         cur.execute(ACCESS_SQL, (student_id, doctor_id))
+        return bool(cur.fetchone()[0])
+
+
+def has_course_access(conn, student_id, course_id):
+    """Whether an active, unexpired enrollment grants this course."""
+
+    if student_id is None or course_id is None:
+        return False
+
+    with conn.cursor() as cur:
+        cur.execute(COURSE_ACCESS_SQL, (student_id, course_id))
         return bool(cur.fetchone()[0])
 
 
@@ -108,11 +129,11 @@ def can_watch_video(conn, student_id, video_id):
     if row is None:
         return False, None, None
 
-    doctor_id, title, is_preview = row
+    doctor_id, title, is_preview, course_id = row
     if is_preview or (student_id is not None and int(student_id) == doctor_id):
         return True, doctor_id, title
 
-    return has_access(conn, student_id, doctor_id), doctor_id, title
+    return has_course_access(conn, student_id, course_id), doctor_id, title
 
 
 def accessible_course_video_ids(
@@ -120,7 +141,7 @@ def accessible_course_video_ids(
 ):
     """Videos whose transcripts may be exposed from this video's course.
 
-    A subscribed student (or the owning doctor) may use every video in the
+    An enrolled student (or the owning doctor) may use every video in the
     course. A student who reached the opened video only because it is a preview
     may use preview transcripts only. Disabling subscription enforcement in
     development opens the whole course, but never another course.
@@ -135,8 +156,8 @@ def accessible_course_video_ids(
 
     doctor_id, is_preview, course_id = row
     owns_content = student_id is not None and int(student_id) == doctor_id
-    subscribed = owns_content or has_access(conn, student_id, doctor_id)
-    include_paid = not enforce_subscriptions or subscribed
+    enrolled = owns_content or has_course_access(conn, student_id, course_id)
+    include_paid = not enforce_subscriptions or enrolled
 
     if enforce_subscriptions and not include_paid and not is_preview:
         return []
