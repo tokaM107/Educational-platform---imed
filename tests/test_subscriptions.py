@@ -77,9 +77,9 @@ def test_an_unknown_lecture_is_refused_rather_than_allowed():
     assert (allowed, doctor_id, title) == (False, None, None)
 
 
-def test_a_subscribed_student_may_watch_a_course_item_video():
+def test_an_enrolled_student_may_watch_a_course_item_video():
     allowed, doctor_id, title = subscriptions.can_watch_video(
-        FakeConn([(7, "Anatomy video", False), (True,)]),
+        FakeConn([(7, "Anatomy video", False, 16), (True,)]),
         student_id=3,
         video_id=11,
     )
@@ -87,9 +87,9 @@ def test_a_subscribed_student_may_watch_a_course_item_video():
     assert (allowed, doctor_id, title) == (True, 7, "Anatomy video")
 
 
-def test_a_preview_video_does_not_require_a_subscription():
+def test_a_preview_video_does_not_require_an_enrollment():
     allowed, doctor_id, title = subscriptions.can_watch_video(
-        FakeConn([(7, "Preview", True)]), student_id=3, video_id=11
+        FakeConn([(7, "Preview", True, 16)]), student_id=3, video_id=11
     )
 
     assert (allowed, doctor_id, title) == (True, 7, "Preview")
@@ -103,7 +103,7 @@ def test_a_non_video_course_item_is_not_accepted_as_a_video():
     assert (allowed, doctor_id, title) == (False, None, None)
 
 
-def test_subscriber_can_search_every_video_in_the_same_course():
+def test_enrolled_student_can_search_every_video_in_the_same_course():
     conn = FakeConn([
         (7, False, 16),
         (True,),
@@ -134,7 +134,7 @@ def test_preview_user_can_search_preview_videos_but_not_paid_siblings():
     assert conn._cursor.sql[-1][1] == (16, False)
 
 
-def test_paid_video_without_subscription_has_no_transcript_scope():
+def test_paid_video_without_enrollment_has_no_transcript_scope():
     video_ids = subscriptions.accessible_course_video_ids(
         FakeConn([(7, False, 16), (False,)]),
         student_id=3,
@@ -145,11 +145,23 @@ def test_paid_video_without_subscription_has_no_transcript_scope():
     assert video_ids == []
 
 
+def test_course_access_requires_active_unexpired_enrollment():
+    conn = FakeConn([(True,)])
+
+    assert subscriptions.has_course_access(conn, student_id=3, course_id=16)
+    sql, params = conn._cursor.sql[0]
+    assert "status = 'active'" in sql
+    assert "expires_at > CURRENT_TIMESTAMP" in sql
+    assert params == (3, 16)
+
+
 def test_an_anonymous_viewer_has_no_access():
     """No identity, no entitlement — the check cannot be skipped by omission."""
 
     assert subscriptions.has_access(FakeConn([]), None, 7) is False
     assert subscriptions.has_access(FakeConn([]), 3, None) is False
+    assert subscriptions.has_course_access(FakeConn([]), None, 16) is False
+    assert subscriptions.has_course_access(FakeConn([]), 3, None) is False
 
 
 def test_enrolment_needs_a_subscription_to_that_course_s_teacher():
