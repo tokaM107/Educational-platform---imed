@@ -303,9 +303,9 @@ their description says public. `/health` is also public.
 
 Chat retrieval searches the opened video's transcript first. If it finds no
 relevant evidence, it searches only transcripts from videos in the same course
-that the caller may access. Citations and playback segments always identify the
-video that actually supplied the answer; preview access never exposes paid
-sibling videos.
+that the caller may access through an active, unexpired course enrollment.
+Citations and playback segments always identify the video that actually
+supplied the answer; preview access never exposes paid sibling videos.
 
 ```bash
 TOKEN=$(curl -s localhost:8000/api/auth/login -H 'Content-Type: application/json' \
