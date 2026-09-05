@@ -15,11 +15,20 @@ transformers==5.15.0
 accelerate==1.14.0
 
 # Audio decoding and the processor's tokeniser.
-librosa==1.0.0
+#
+# librosa is held at the 0.11.x line, and numpy below, because the base image's
+# torch lives in Python 3.10 (see gpu/Dockerfile). librosa 1.0.0 and numpy
+# 2.5.2 are both `Requires-Python >=3.12`, so pip skipped them entirely and the
+# install failed on 3.10. Moving to 3.11 does not help -- it is still below the
+# 3.12 floor -- and moving to 3.12/3.13 would leave the CUDA-matched torch
+# behind in 3.10. Raise these only together with the interpreter that has torch.
+librosa==0.11.0
 soundfile==0.14.0
 sentencepiece==0.2.2
 protobuf==7.35.1
 
-# Used by rag/audio.py only for its stdlib-adjacent wav handling; numpy comes
-# with librosa but is pinned so a resolver cannot pick an incompatible one.
-numpy==2.5.2
+# Pulled in by librosa and the transformers audio processor rather than by our
+# own code -- rag/audio.py does its wav handling with the stdlib and ffmpeg --
+# but pinned so a resolver cannot pick an incompatible one underneath them.
+# 2.2.x is the last line that supports Python 3.10; see the librosa note above.
+numpy==2.2.6
