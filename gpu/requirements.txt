@@ -1,0 +1,25 @@
+# The GPU worker's Python dependencies, and nothing the application server needs.
+#
+# torch is deliberately absent. The base image (see gpu/Dockerfile) ships a
+# build matched to its CUDA version, and installing a second one from PyPI
+# replaces a working GPU torch with one that may not see the card — which
+# surfaces as the model silently running on CPU at roughly 1x instead of 117x.
+#
+# ffmpeg is a system package, installed with apt in the Dockerfile, not here.
+
+# The serverless SDK: runpod.serverless.start({"handler": handler}).
+runpod==1.7.7
+
+# The ASR itself.
+transformers==5.15.0
+accelerate==1.14.0
+
+# Audio decoding and the processor's tokeniser.
+librosa==1.0.0
+soundfile==0.14.0
+sentencepiece==0.2.2
+protobuf==7.35.1
+
+# Used by rag/audio.py only for its stdlib-adjacent wav handling; numpy comes
+# with librosa but is pinned so a resolver cannot pick an incompatible one.
+numpy==2.5.2
