@@ -54,10 +54,37 @@ supabase/.temp
 way2APlus_db
 **/.git
 
-# Offline RAG/ML pipeline: retain only the Bunny HTTP helper used by the API.
+# Offline RAG/ML pipeline. Deny by default, then re-admit exactly the modules
+# the two images COPY — and nothing else, so the ML-only tooling stays out of
+# the build context.
+#
+# This file is shared by both Dockerfiles because they share a build context,
+# so the list below is the UNION of what each needs. Keeping it narrower than
+# the union does not make a smaller image — each Dockerfile's COPY decides
+# that — it just makes the build fail, and it fails at COPY with
+# "not found" rather than anything that names .dockerignore. If you add a
+# `COPY rag/<file>` to either Dockerfile, add it here in the same commit.
 rag/*
+
+# Needed by the API image (Dockerfile) for the API and the queue worker.
 !rag/__init__.py
 !rag/bunny.py
+!rag/chunking.py
+!rag/ingest.py
+!rag/transcribe_runpod.py
+!rag/transcript_format.py
+!rag/worker.py
+
+# Needed by the GPU image (gpu/Dockerfile) for the serverless ASR worker.
+!rag/audio.py
+!rag/transcribe_cohere.py
+
+# Shared by both: the SSRF guard is enforced on each side of the boundary.
+!rag/media_url.py
+
+# Still excluded on purpose: eval_retrieval.py, transcribe.py and
+# transcribe_whisper.py are operator CLIs and superseded code that neither
+# image runs.
 
 # Editor/search experiments not used by the runtime search endpoint.
 search-assistant/__pycache__
