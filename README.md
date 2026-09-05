@@ -68,10 +68,18 @@ rag/                    offline pipelines, not imported by the API
   audio.py              streams a source into 5-min wav chunks, one at a time
   transcribe.py         the pipeline: upload -> encode -> audio -> transcript (CLI)
   transcribe_cohere.py  Arabic ASR over the chunks (local Cohere model)
+  transcribe_runpod.py  RunPod Serverless client: submit, status, cancel
   transcribe_whisper.py superseded; kept for reference (writes permanent audio)
+  transcript_format.py  writes the block format chunking.py parses
+  media_url.py          which URLs the GPU worker may fetch (SSRF guard)
   chunking.py           transcript -> timestamped chunks (pure, tested)
-  ingest.py             chunk -> embed -> store  (CLI)
+  ingest.py             chunk -> embed -> store  (CLI + reusable)
+  worker.py             submits queued Bunny videos, settles finished ones (CLI)
   eval_retrieval.py     retrieval / answer smoke test (CLI)
+
+gpu/                    the RunPod Serverless worker; never in the API image
+  handler.py            runpod.serverless handler: Bunny URL -> transcript blocks
+  Dockerfile            GPU image, model baked in (see gpu/README.md)
 
 db/                     FROZEN. schema.sql and migrations/001-014 are history
                         now, kept for the reasoning written into them. Nothing
@@ -172,7 +180,131 @@ front of a lecture, and from questions they actually answered. A student who has
 not watched anything gets a report that says exactly that, which is the truth and
 more useful than an invented week.
 
-## Ingest a course video
+## Automatic transcription
+
+A video uploaded to Bunny transcribes itself, once, without anybody running a
+command. By the time a student opens the chat the answer is already a database
+lookup — `app/services/retrieval.py` is a pgvector query over
+`transcript_chunks` and never transcribes anything.
+
+```
+Bunny finishes encoding
+   │  POST /api/webhooks/bunny?secret=...          (app/api/webhooks.py)
+   ▼
+transcription_jobs           one row per Bunny guid, UNIQUE
+   │  claimed by             (rag/worker.py, FOR UPDATE SKIP LOCKED)
+   ▼
+RunPod Serverless            GPU starts on demand, scales to zero when idle
+   │  the worker fetches from Bunny directly: ffmpeg + Cohere Arabic ASR
+   ▼
+transcript_chunks            chunked, embedded, in Supabase
+```
+
+The application server never touches the media. It hands RunPod a Bunny URL and
+receives text, so it needs no GPU, no ffmpeg and no bandwidth for hour-long
+lectures. Temporary audio lives only on the GPU worker, under
+`/tmp/transcription_jobs/<job_id>/`, and is deleted in a `finally` on every
+path — success, ASR failure, ffmpeg failure, or timeout.
+
+Full deployment and operations guide: [gpu/README.md](gpu/README.md).
+
+### Exactly once
+
+Bunny does not promise to deliver a webhook once — it retries, and it fires for
+several status transitions. The guarantee is a `UNIQUE` constraint on
+`transcription_jobs.bunny_guid` plus `ON CONFLICT DO NOTHING`: a repeated
+callback becomes an insert that changes no rows. Checking in Python first would
+leave a window where two concurrent retries both decide to queue the video,
+which is exactly what a retry storm produces.
+
+A job that has already completed is never re-run by a callback. Transcribing
+again on purpose is `python -m rag.worker --video-id 11`, which also replaces
+that video's chunks rather than adding a second copy of them.
+
+### Submit, then poll
+
+The worker never holds a connection open while a GPU works. It submits, stores
+`runpod_job_id` against the row, and asks later:
+
+    pending → submitted → processing → completed
+                                    ↘ failed (retried while attempts remain)
+
+Persisting the RunPod job id is what makes a worker restart free — the next
+pass collects a transcript produced while nothing was watching, instead of
+re-submitting the lecture and paying for it twice. For the same reason, a poll
+that *could not complete* is not treated as a transcription that failed: an
+unreachable RunPod leaves the job in flight and asks again.
+
+### Setting it up
+
+The queue table is a schema change, and this repository does not own the
+schema — apply `db/proposals/20260905_transcription_jobs.sql` from
+[educational-platform-db](https://github.com/tokaM107/educational-platform-db)
+as `supabase migration new`, then regenerate the drift canary here with `make
+db-gen`. See `db/proposals/README.md`.
+
+Then in the Bunny Stream library's **Webhook** settings, set the URL to:
+
+```
+https://<your-api-host>/api/webhooks/bunny?secret=<BUNNY_WEBHOOK_SECRET>
+```
+
+Bunny signs nothing, so that secret is the only thing separating the endpoint
+from anyone who guesses the path — **treat the whole URL as a credential**. The
+endpoint refuses everything when `BUNNY_WEBHOOK_SECRET` is unset rather than
+accepting everything, so a forgotten variable fails closed.
+
+```env
+ASR_BACKEND=runpod
+RUNPOD_API_KEY=...
+RUNPOD_ENDPOINT_ID=...
+BUNNY_WEBHOOK_SECRET=...
+```
+
+### Running the worker
+
+```bash
+docker compose up -d worker      # or:
+python -m rag.worker             # submit and poll continuously
+python -m rag.worker --once      # one pass over both, then exit
+python -m rag.worker --status    # what the queue is doing
+python -m rag.worker --video-id 11   # re-transcribe one video deliberately
+```
+
+Safe to run more than one: claiming uses `FOR UPDATE SKIP LOCKED`, so a second
+worker takes the next job rather than contending for the same one. A worker
+killed mid-poll leaves its job claimable again after
+`TRANSCRIPTION_STALE_MINUTES`, and a failing job is retried up to its own
+`max_attempts` before being abandoned with the reason in `last_error`.
+
+### Where a stuck video shows up
+
+```sql
+SELECT bunny_guid, video_id, status, attempt_count, max_attempts,
+       runpod_job_id, last_error
+FROM transcription_jobs WHERE status <> 'completed' ORDER BY created_at;
+```
+
+`video_id` is null while Bunny has finished encoding but Nest has not yet
+written `course_items.video_ref` — the job is queued anyway and the worker
+resolves it on a later attempt, because dropping the callback would mean the
+video is never transcribed at all.
+
+### Known: existing chunks with no video_id
+
+The live database holds 151 `transcript_chunks` rows from the pre-`course_items`
+era whose `video_id` is null, so course-video retrieval cannot see them. This
+predates the pipeline and is **not** fixed automatically — every chunk written
+from now on carries `video_id`. The investigation queries and the options for
+dealing with the old rows are in
+`db/proposals/20260905_transcript_chunks_video_id_backfill.sql`, which has not
+been run.
+
+## Ingest a course video by hand
+
+The manual path, still there for a workstation with a GPU and for re-running a
+single video. `ASR_BACKEND=cohere` loads the Arabic model in-process instead of
+calling the pod.
 
 Videos live in a **Bunny Stream** library and are catalogued as `course_items`
 rows with `type = 'video'`. The pipeline reads the Bunny id from `video_ref` and
@@ -288,6 +420,7 @@ their description says public. `/health` is also public.
 | `GET /api/lectures` | lectures with chunk count and duration |
 | `GET /api/lectures/{id}/video` | the whole video, with byte-range support so seeking works |
 | `GET /api/videos/{video_id}/video` | authenticated Bunny playback for a course-item video |
+| `POST /api/webhooks/bunny` | Bunny encode-finished callback; queues one transcription. Authenticated by `?secret=`, not by a user token |
 | `POST /api/events` | record one video event (insert only, deliberately trivial) |
 | `GET /api/events/analytics` | watch time / time away / session length for a session |
 | `GET /api/reports/weekly` | a student's week on a course, with a generated narrative |
