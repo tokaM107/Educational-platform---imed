@@ -200,6 +200,69 @@ class Settings:
         self.bunny_api_key = env("BUNNY_STREAM_API_KEY", "")
         self.bunny_cdn_hostname = env("BUNNY_STREAM_CDN_HOSTNAME", "")
 
+        # Bunny Stream webhooks carry no signature, so the only thing that
+        # distinguishes a real callback from anybody who guessed the path is a
+        # secret we put in the URL ourselves. Unset means the endpoint refuses
+        # every request rather than trusting the internet.
+        self.bunny_webhook_secret = env("BUNNY_WEBHOOK_SECRET", "")
+
+        # --- Transcription ---
+        #
+        # Which ASR the worker uses.
+        #
+        #   runpod  RunPod Serverless. The GPU starts when a job arrives and
+        #           scales back to zero when the queue empties, so nothing is
+        #           billed between lectures. What production uses: this server
+        #           needs no GPU, no ffmpeg and no model weights of its own.
+        #   cohere  the same model loaded in this process. Needs a GPU and the
+        #           full requirements.txt — the workstation/benchmark path.
+        self.asr_backend = env("ASR_BACKEND", "runpod")
+
+        # RunPod Serverless. The endpoint id is the one in the endpoint's URL;
+        # the API key is account-wide and must never reach a browser.
+        self.runpod_api_key = env("RUNPOD_API_KEY", "")
+        self.runpod_endpoint_id = env("RUNPOD_ENDPOINT_ID", "")
+
+        # RunPod's REST base. Configurable only so tests can point it at a
+        # local stub; there is no reason to change it in a deployment.
+        self.runpod_api_base = env("RUNPOD_API_BASE", "https://api.runpod.ai/v2")
+
+        # How often the worker asks RunPod whether a submitted job has
+        # finished. The job is minutes long, so a tight poll is all overhead.
+        self.runpod_poll_interval_seconds = int(
+            env("RUNPOD_POLL_INTERVAL_SECONDS", "15")
+        )
+
+        # How long a job may stay unfinished on RunPod before this side gives
+        # up on it and retries. Measured from submission, not from claim.
+        self.runpod_job_timeout_seconds = int(
+            env("RUNPOD_JOB_TIMEOUT_SECONDS", "3600")
+        )
+
+        # How long a single HTTP call to RunPod may hang. Submitting and
+        # polling are both quick calls — this is not the transcription budget.
+        self.runpod_request_timeout_seconds = int(
+            env("RUNPOD_REQUEST_TIMEOUT_SECONDS", "60")
+        )
+
+        # The model the GPU worker loads. Here as well as on the worker so the
+        # two cannot silently disagree about which transcript they produce.
+        self.cohere_transcribe_model = env(
+            "COHERE_TRANSCRIBE_MODEL", "CohereLabs/cohere-transcribe-arabic-07-2026"
+        )
+
+        # A job that has failed this many times stops being retried. Something
+        # that broke three times is broken in a way another attempt will not
+        # fix, and an unbounded retry on a metered GPU bills for every one.
+        self.transcription_max_attempts = int(env("TRANSCRIPTION_MAX_ATTEMPTS", "3"))
+
+        # How long a job may sit claimed but unfinished before another worker
+        # may take it. Crash recovery, not a limit on how long a lecture takes:
+        # a worker killed mid-poll would otherwise hold its job forever.
+        self.transcription_stale_minutes = int(
+            env("TRANSCRIPTION_STALE_MINUTES", "120")
+        )
+
         # --- Paths ---
         self.base_dir = BASE_DIR
         self.data_dir = BASE_DIR / "data"
@@ -230,6 +293,56 @@ class Settings:
             raise RuntimeError("NEST_JWT_ACCESS_SECRET must be at least 32 characters")
 
         return self.nest_jwt_access_secret
+
+    def require_bunny_webhook_secret(self):
+
+        if not self.bunny_webhook_secret:
+            raise RuntimeError("BUNNY_WEBHOOK_SECRET is not set (see .env)")
+
+        return self.bunny_webhook_secret
+
+    def require_runpod(self):
+        """(endpoint_base, api_key), or a refusal naming what is missing.
+
+        Both together: an endpoint id without a key cannot authenticate, and a
+        key without an endpoint id has nowhere to go. Finding out one at a time
+        means a job is claimed, fails, and burns an attempt before the
+        configuration problem is visible.
+        """
+
+        missing = [
+            name
+            for name, value in (
+                ("RUNPOD_API_KEY", self.runpod_api_key),
+                ("RUNPOD_ENDPOINT_ID", self.runpod_endpoint_id),
+            )
+            if not value
+        ]
+
+        if missing:
+            raise RuntimeError(f"{', '.join(missing)} not set (see .env)")
+
+        base = self.runpod_api_base.strip().rstrip("/")
+
+        return f"{base}/{self.runpod_endpoint_id.strip()}", self.runpod_api_key
+
+    def bunny_media_hosts(self):
+        """Hostnames the GPU worker is allowed to fetch media from.
+
+        The worker is handed a URL and downloads it on a machine holding a
+        Hugging Face token and an API key, so an unchecked URL is a
+        server-side request forgery with a GPU attached. Only the configured
+        pull zone qualifies, and `video.bunnycdn.com` for API-issued links.
+        """
+
+        hosts = {"video.bunnycdn.com"}
+
+        hostname = self.bunny_cdn_hostname.strip().rstrip("/")
+
+        if hostname:
+            hosts.add(hostname.removeprefix("https://").removeprefix("http://"))
+
+        return hosts
 
     def require_bunny(self):
         """(library_id, api_key, cdn_hostname), or a refusal naming what is missing.
