@@ -471,3 +471,69 @@ def test_every_update_sets_updated_at():
         assert "updated_at = now()" in statement, (
             f"an UPDATE does not set updated_at:\n{statement}"
         )
+
+
+# -------------------------
+# The local (cohere) backend
+# -------------------------
+
+
+def test_the_cohere_backend_never_calls_runpod(monkeypatch, no_network):
+    """ASR_BACKEND=cohere transcribes in-process; there is no remote job."""
+
+    monkeypatch.setattr(worker.get_settings(), "asr_backend", "cohere")
+    claims = iter([a_job(runpod_job_id=None)])
+    monkeypatch.setattr(transcription_jobs, "claim_for_submission",
+                        lambda conn: next(claims, None))
+    monkeypatch.setattr(
+        worker, "transcribe_locally",
+        lambda url, chunk_seconds=None: (
+            [(0, 0, 300, "نص")],
+            {"audio_duration_seconds": 300.0, "gpu_processing_seconds": 2.5,
+             "rtfx": 120.0},
+        ),
+    )
+    marks = record_marks(monkeypatch)
+
+    assert worker.submit_next(FakeConn()) is True
+    assert no_network["submitted"] == []
+    assert no_network["ingested"] == [11]
+
+    name, args = marks[0]
+    assert name == "mark_completed"
+    assert args[2]["rtfx"] == 120.0
+
+
+def test_an_unknown_backend_fails_before_spending_anything(monkeypatch, no_network):
+    monkeypatch.setattr(worker.get_settings(), "asr_backend", "whisper")
+    claims = iter([a_job(runpod_job_id=None)])
+    monkeypatch.setattr(transcription_jobs, "claim_for_submission",
+                        lambda conn: next(claims, None))
+    marks = record_marks(monkeypatch)
+
+    worker.submit_next(FakeConn())
+
+    assert no_network["submitted"] == []
+    assert marks[0][0] == "mark_failed"
+    assert "unknown ASR_BACKEND" in str(marks[0][1][1])
+
+
+def test_local_transcription_always_removes_its_temp_directory(monkeypatch):
+    """Same discipline as the GPU worker: one directory, removed in a finally."""
+
+    import rag.audio
+
+    seen = {}
+
+    def exploding_chunks(source, chunk_seconds, workspace):
+        seen["workspace"] = workspace
+        raise RuntimeError("ffmpeg died")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(rag.audio, "iter_audio_chunks", exploding_chunks)
+
+    with pytest.raises(RuntimeError, match="ffmpeg died"):
+        worker.transcribe_locally("https://cdn.example/x.mp4")
+
+    import os
+    assert not os.path.exists(seen["workspace"])

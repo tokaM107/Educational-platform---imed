@@ -114,8 +114,107 @@ def media_url_for(guid):
 # -------------------------
 
 
+def transcribe_locally(source_url, chunk_seconds=None):
+    """Run the Cohere Arabic model in this process. Returns (blocks, metrics).
+
+    The `ASR_BACKEND=cohere` path: the same model the serverless worker loads,
+    but in-process, for a machine that has a GPU. Used to benchmark a card and
+    to transcribe without a RunPod endpoint at all.
+
+    It carries the same temporary-file discipline as gpu/handler.py, because it
+    is doing the same thing in the same way: one directory per run, removed in
+    a `finally` whatever happens. On a workstation that matters less than on a
+    warm serverless worker, but a 74-minute lecture is still gigabytes of wav
+    if nothing cleans up after a failure.
+
+    Imported inside the function: transformers and a multi-gigabyte model must
+    not be pulled in by a worker running the RunPod backend, whose image does
+    not contain them.
+    """
+
+    import shutil
+    import tempfile
+
+    from rag.audio import CHUNK_SECONDS, iter_audio_chunks
+    from rag.transcribe_cohere import transcribe_chunk
+
+    workspace = tempfile.mkdtemp(prefix="transcription-")
+
+    blocks = []
+    audio_seconds = 0.0
+    gpu_seconds = 0.0
+
+    try:
+        for chunk in iter_audio_chunks(
+            source_url,
+            chunk_seconds=chunk_seconds or CHUNK_SECONDS,
+            workspace=workspace,
+        ):
+            started = time.monotonic()
+            text, _ = transcribe_chunk(chunk.path)
+            gpu_seconds += time.monotonic() - started
+
+            audio_seconds += chunk.duration_seconds
+
+            blocks.append(
+                (
+                    chunk.index,
+                    int(chunk.start_seconds),
+                    int(chunk.end_seconds),
+                    text,
+                )
+            )
+
+            logger.info(
+                "chunk %d transcribed (%.0fs audio, %.1fs GPU)",
+                chunk.index, chunk.duration_seconds, time.monotonic() - started,
+            )
+
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+    if not blocks:
+        raise JobError("the source produced no audio — nothing to transcribe")
+
+    return blocks, {
+        "audio_duration_seconds": round(audio_seconds, 1),
+        "gpu_processing_seconds": round(gpu_seconds, 2),
+        "rtfx": round(audio_seconds / gpu_seconds, 1) if gpu_seconds else None,
+    }
+
+
+def run_locally(conn, job, source_url, video_id):
+    """Transcribe and store one job in this process, without RunPod.
+
+    The job never enters the submit/poll cycle: there is no remote job to poll,
+    so it goes from claimed straight to completed or failed. The same rows and
+    the same statuses are written, so a locally transcribed video is
+    indistinguishable afterwards from one the GPU endpoint produced.
+    """
+
+    blocks, metrics = transcribe_locally(source_url)
+
+    count = ingest.ingest_blocks(conn, video_id, blocks)
+
+    transcription_jobs.mark_completed(conn, job["id"], count, metrics)
+
+    logger.info(
+        "job=%s video_id=%s completed locally: %d chunks, "
+        "audio=%ss gpu=%ss rtfx=%s",
+        job["id"], video_id, count,
+        metrics["audio_duration_seconds"], metrics["gpu_processing_seconds"],
+        metrics["rtfx"],
+    )
+
+    return count
+
+
 def submit_next(conn):
-    """Claim one job and hand it to RunPod. True if there was one."""
+    """Claim one job and hand it to RunPod. True if there was one.
+
+    With `ASR_BACKEND=cohere` there is nothing to hand anywhere: the job is
+    transcribed here and finished in this call.
+    """
 
     job = transcription_jobs.claim_for_submission(conn)
 
@@ -142,6 +241,23 @@ def submit_next(conn):
             transcription_jobs.attach_video_id(conn, guid, video_id)
 
         source_url, length = media_url_for(guid)
+
+        backend = get_settings().asr_backend
+
+        if backend == "cohere":
+            logger.info(
+                "job=%s guid=%s video_id=%s attempt=%s/%s length=%ss "
+                "transcribing locally (ASR_BACKEND=cohere)",
+                job["id"], guid, video_id, job["attempt_count"],
+                job["max_attempts"], length,
+            )
+            run_locally(conn, job, source_url, video_id)
+            return True
+
+        if backend != "runpod":
+            raise JobError(
+                f"unknown ASR_BACKEND {backend!r} (expected runpod or cohere)"
+            )
 
         runpod_job_id = transcribe_runpod.submit(source_url, video_id=video_id)
 
