@@ -235,3 +235,12 @@ supabase_restore.sql
 # Local Supabase CLI state and the separate database source repository.
 /supabase/.temp/
 /way2APlus_db/
+
+# Local transcription experiments. Media staged at the repo root rather than
+# under data/ is not covered by the rules above, and a lecture rendition is
+# hundreds of megabytes — one `git add -A` away from being committed for good.
+/*.mp4
+/*.mp3
+/*.wav
+/audio_chunks/
+/groq_test_transcript.txt
