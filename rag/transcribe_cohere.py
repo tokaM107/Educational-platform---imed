@@ -33,18 +33,43 @@ DEFAULT_CHUNKS_DIR = "data/audios/chunks"
 DEFAULT_OUTPUT = "data/transcripts/transcript.txt"
 
 
+def model_id():
+    """Which checkpoint to load. Env first so the GPU image needs no rebuild."""
+
+    import os
+
+    return os.getenv("COHERE_TRANSCRIBE_MODEL", "").strip() or MODEL_ID
+
+
 @lru_cache
 def load_model():
-    """Processor and model, once per process."""
+    """Processor and model, once per process.
 
+    `lru_cache` is what makes a warm RunPod worker cheap: the second job on the
+    same container gets the model already in VRAM, and only a cold start pays
+    the several-gigabyte load.
+
+    bfloat16 on CUDA, matching the benchmarked configuration — ~3.85 GB idle
+    and ~4.90 GB peak on a 20 GB card, against roughly double that in fp32 for
+    no measured accuracy gain on this model. Left at the checkpoint's own dtype
+    off CUDA, because bfloat16 on CPU is slower than fp32, not faster.
+    """
+
+    import torch
     from transformers import AutoProcessor, CohereAsrForConditionalGeneration
 
-    processor = AutoProcessor.from_pretrained(MODEL_ID)
+    checkpoint = model_id()
 
-    model = CohereAsrForConditionalGeneration.from_pretrained(
-        MODEL_ID,
-        device_map="auto",
-    )
+    processor = AutoProcessor.from_pretrained(checkpoint)
+
+    kwargs = {"device_map": "auto"}
+
+    if torch.cuda.is_available():
+        kwargs["dtype"] = torch.bfloat16
+
+    model = CohereAsrForConditionalGeneration.from_pretrained(checkpoint, **kwargs)
+
+    model.eval()
 
     return processor, model
 
@@ -59,8 +84,16 @@ def timestamp(seconds):
 
 
 def transcribe_chunk(chunk_path):
-    """One chunk of audio -> (text, duration in seconds)."""
+    """One chunk of audio -> (text, duration in seconds).
 
+    `language="ar"` on both the processor and the decode is what keeps Arabic
+    speech as Arabic. This model can be asked to translate, and left to infer
+    the target it sometimes answers an Egyptian lecture in English — which
+    would be retrieved against an Arabic question and cited back to a student
+    in the wrong language.
+    """
+
+    import torch
     from transformers.audio_utils import load_audio
 
     processor, model = load_model()
@@ -79,7 +112,10 @@ def transcribe_chunk(chunk_path):
 
     inputs.to(model.device, dtype=model.dtype)
 
-    outputs = model.generate(**inputs, max_new_tokens=256)
+    # No autograd graph: this is inference only, and building one costs VRAM
+    # that the measured 4.90 GB peak does not include.
+    with torch.inference_mode():
+        outputs = model.generate(**inputs, max_new_tokens=256)
 
     text = processor.decode(
         outputs,
