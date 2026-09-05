@@ -116,6 +116,117 @@ def replace_chunks(conn, video_id, chunks, embeddings):
     conn.commit()
 
 
+def build_chunks(transcript_path, chunk_words=None, overlap_words=None):
+    """Transcript file -> chunks. Pure: no database, no API calls."""
+
+    settings = get_settings()
+
+    return chunking.chunk_transcript(
+        chunking.read_transcript(transcript_path),
+        chunk_words=chunk_words or settings.chunk_words,
+        overlap_words=overlap_words or settings.overlap_words,
+    )
+
+
+def store_chunks(conn, video_id, chunks, reembed=False, progress=None):
+    """Embed whatever is new and replace this video's chunks. Returns the count.
+
+    Split out of `main` so the transcription worker can reuse the ingest half
+    without going through the CLI. The reuse-stored-embeddings behaviour is the
+    part that matters to share: re-running over a lightly edited transcript
+    should pay for the chunks that changed and no others.
+    """
+
+    require_video(conn, video_id)
+
+    stored = {} if reembed else load_existing_embeddings(conn, video_id)
+
+    missing = [chunk for chunk in chunks if chunk.text not in stored]
+
+    if missing:
+
+        vectors = Embedder().embed_documents(
+            [chunk.text for chunk in missing],
+            progress=progress,
+        )
+
+        stored.update(
+            (chunk.text, vector) for chunk, vector in zip(missing, vectors)
+        )
+
+    replace_chunks(
+        conn, video_id, chunks, [stored[chunk.text] for chunk in chunks]
+    )
+
+    return len(chunks)
+
+
+def ingest_transcript(
+    conn, video_id, transcript_path, chunk_words=None, overlap_words=None,
+    reembed=False, progress=None,
+):
+    """Transcript file -> stored, embedded chunks. Returns the count."""
+
+    chunks = build_chunks(transcript_path, chunk_words, overlap_words)
+
+    if not chunks:
+        raise RuntimeError(f"{transcript_path} produced no chunks")
+
+    return store_chunks(
+        conn, video_id, chunks, reembed=reembed, progress=progress
+    )
+
+
+def chunks_from_blocks(blocks, chunk_words=None, overlap_words=None):
+    """(index, start_ts, end_ts, text) tuples -> retrievable chunks.
+
+    The in-memory twin of `build_chunks`, and the reason the application server
+    writes no transcript file at all: the GPU worker returns its blocks as
+    JSON, and they go from the HTTP response into the chunker without ever
+    becoming a file on this machine.
+
+    The ASR's own five-minute blocks are *not* used as chunks. They are far too
+    coarse to retrieve — one embedding would have to stand for several
+    unrelated ideas, and a citation would seek the student to the top of a
+    five-minute stretch. chunking.chunk_transcript re-cuts them into ~120-word
+    windows and interpolates a timestamp for each, which is what makes a
+    citation land on the sentence rather than the block.
+    """
+
+    settings = get_settings()
+
+    return chunking.chunk_transcript(
+        [
+            chunking.Block(
+                source=f"block_{index:03d}",
+                start_ts=start_ts,
+                end_ts=end_ts,
+                text=text,
+            )
+            for index, start_ts, end_ts, text in blocks
+            if str(text).strip()
+        ],
+        chunk_words=chunk_words or settings.chunk_words,
+        overlap_words=overlap_words or settings.overlap_words,
+    )
+
+
+def ingest_blocks(conn, video_id, blocks, reembed=False, progress=None):
+    """Transcript blocks -> stored, embedded chunks. Returns the count.
+
+    What the RunPod worker path uses. `replace_chunks` deletes this video's
+    existing rows inside the same transaction that inserts the new ones, so a
+    retried job replaces its chunks rather than adding a second copy of them.
+    """
+
+    chunks = chunks_from_blocks(blocks, chunk_words=None, overlap_words=None)
+
+    if not chunks:
+        raise RuntimeError(f"video {video_id}: the transcript produced no chunks")
+
+    return store_chunks(conn, video_id, chunks, reembed=reembed, progress=progress)
+
+
 def main(argv=None):
 
     args = parse_args(argv)
