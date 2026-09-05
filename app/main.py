@@ -12,7 +12,8 @@ from fastapi.responses import JSONResponse
 from google.genai import errors as genai_errors
 
 from app.api import (auth, chat, events, exams, lectures, notifications,
-                     questions, reports, search, subscriptions, videos)
+                     questions, reports, search, subscriptions, videos,
+                     webhooks)
 from app.config import get_settings
 from app.db import close_pool, open_pool
 
@@ -65,6 +66,7 @@ app.include_router(notifications.router)
 app.include_router(exams.router)
 app.include_router(subscriptions.router)
 app.include_router(search.router)
+app.include_router(webhooks.router)
 
 @app.exception_handler(genai_errors.APIError)
 def handle_genai_error(request: Request, error: genai_errors.APIError):
