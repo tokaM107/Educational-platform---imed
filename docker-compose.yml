@@ -15,5 +15,23 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  # The transcription worker: same image as the API, different command.
+  #
+  # Separate container rather than a thread inside the API because the two fail
+  # and scale differently — transcribing an hour of lecture must not hold a
+  # request worker, and restarting the API must not abandon a job mid-run. The
+  # queue in Postgres is the handoff, so either side can restart independently.
+  #
+  # Safe to run more than one: claiming uses FOR UPDATE SKIP LOCKED, so a
+  # second worker takes the next job rather than contending for the same one.
+  worker:
+    build: .
+    container_name: medical_ai_worker
+    restart: unless-stopped
+    command: ["python", "-m", "rag.worker"]
+    env_file: .env
+    depends_on:
+      - db
+
 volumes:
   postgres_data:
