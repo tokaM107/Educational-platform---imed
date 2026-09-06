@@ -25,6 +25,7 @@ both, is what stops the two allowlists from drifting again.
 """
 
 import os
+import re
 from urllib.parse import urlparse
 
 
@@ -35,6 +36,44 @@ BUNNY_API_HOST = "video.bunnycdn.com"
 
 class UntrustedMediaURL(Exception):
     """The URL is not one we are willing to fetch."""
+
+
+# A signed media URL carries `token` and `expires`. The token is not the
+# security key and cannot be reversed into one, but it is a bearer credential
+# for that video until it expires, and it must not survive in a log line, an
+# exception message, or a `transcription_jobs.last_error` column that outlives
+# it by months.
+CREDENTIAL_PARAMETERS = ("token", "expires", "token_path")
+
+
+def redact(text):
+    """Every media URL in `text`, with its query credentials removed.
+
+    Takes text rather than a URL because the worst leak is not a URL somebody
+    logged deliberately — it is ffmpeg's stderr, which quotes the URL it could
+    not read straight into the error the pipeline stores and shows.
+    """
+
+    if not text or not isinstance(text, str):
+        return text
+
+    def scrub(match):
+        url = match.group(0)
+        head, _, query = url.partition("?")
+
+        if not query:
+            return url
+
+        kept = [
+            pair for pair in query.split("&")
+            if pair.split("=")[0].lower() not in CREDENTIAL_PARAMETERS
+        ]
+
+        # A marker rather than nothing, so a redacted URL is visibly redacted
+        # and not mistaken for one that never carried a token.
+        return head + ("?" + "&".join(kept) if kept else "?…")
+
+    return re.sub(r"https?://[^\s\"'<>]+", scrub, text)
 
 
 def normalise_host(value):

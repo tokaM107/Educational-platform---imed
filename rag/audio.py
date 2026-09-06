@@ -16,11 +16,14 @@ anyway, and a stereo lecture is two copies of one voice.
 """
 
 import contextlib
+import os
 import subprocess
 import tempfile
 import wave
 from pathlib import Path
 from typing import NamedTuple
+
+from rag import media_url
 
 
 SAMPLE_RATE = 16000
@@ -78,30 +81,78 @@ def _run(command, what):
         # ffmpeg says why on stderr, and the last few lines are the part that
         # matters — a 403 from the CDN, a missing file, an unknown codec.
         tail = "\n".join(result.stderr.strip().splitlines()[-6:])
-        raise AudioError(f"{what} failed:\n{tail}")
+        raise AudioError(media_url.redact(f"{what} failed:\n{tail}"))
 
     return result
 
 
 def _reconnect_options(source):
-    """Retry flags, but only when the input is fetched over HTTP.
+    """Retry and header flags, but only when the input is fetched over HTTP.
 
     These belong to ffmpeg's http protocol, not to ffmpeg generally: passing
     them alongside a local path fails the whole command with "Option reconnect
     not found" before it opens anything. So the source decides.
 
-    They matter for the Bunny path, where an hour of audio is a long read across
-    a CDN and a single dropped connection would otherwise discard all of it.
+    The reconnect flags matter for the Bunny path, where an hour of audio is a
+    long read across a CDN and a single dropped connection would otherwise
+    discard all of it.
+
+    BUNNY_MEDIA_REFERER, when set, is sent as the Referer header. Bunny's
+    "Block Direct URL File Access" checks the referring domain, and a
+    serverless GPU browsing nothing sends no Referer at all — so a worker that
+    is otherwise correctly signed can still be refused. Unset means no header
+    and exactly the previous behaviour, because a deployment whose pull zone
+    does not check referrers should not start sending one.
+
+    `-referer` is ffmpeg's own http option rather than a hand-built `-headers`
+    string: it is one value that cannot inject a second header, where
+    `-headers` takes raw text and a newline in it would.
     """
 
-    if str(source).lower().startswith(("http://", "https://")):
-        return [
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "30",
-        ]
+    if not str(source).lower().startswith(("http://", "https://")):
+        return []
 
-    return []
+    options = [
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "30",
+    ]
+
+    referer = media_referer()
+
+    if referer:
+        options += ["-referer", referer]
+
+    return options
+
+
+def media_referer():
+    """The Referer to send with a media fetch, or "" for none.
+
+    Read from the environment rather than passed in, because the GPU worker
+    that needs it has no application settings — this module is vendored into
+    that image on its own. A bare domain is turned into a URL, which is what a
+    browser would have sent and what Bunny matches on.
+    """
+
+    value = os.getenv("BUNNY_MEDIA_REFERER", "").strip()
+
+    if not value:
+        return ""
+
+    # A newline or a space would end up inside a header value; neither belongs
+    # in a domain, so the whole value is refused rather than trimmed into
+    # something that looks like it worked.
+    if any(character.isspace() for character in value):
+        raise AudioError(
+            "BUNNY_MEDIA_REFERER contains whitespace; it should be a bare "
+            "domain such as example.com"
+        )
+
+    if "//" not in value:
+        value = f"https://{value}"
+
+    return value.rstrip("/") + "/"
 
 
 def extract_audio(source, destination, sample_rate=SAMPLE_RATE, overwrite=False):
@@ -388,7 +439,12 @@ def _tail(path, lines=6):
     except OSError:
         return "(no ffmpeg output)"
 
-    return "\n".join(text.splitlines()[-lines:]) or "(no ffmpeg output)"
+    # Redacted here rather than at each caller: everything that reads ffmpeg's
+    # stderr goes through this, and the stderr of a failed fetch contains the
+    # signed URL verbatim.
+    return media_url.redact(
+        "\n".join(text.splitlines()[-lines:])
+    ) or "(no ffmpeg output)"
 
 
 def _stop(process):
