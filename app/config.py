@@ -204,28 +204,29 @@ class Settings:
         # than one. Read on both sides so the two allowlists stay identical.
         self.bunny_media_hosts_extra = env("BUNNY_MEDIA_HOSTS", "")
 
-        # The pull zone's URL Token Authentication Key.
+        # The pull zone's URL Token Authentication Key — what signs direct
+        # file URLs on vz-….b-cdn.net, which is what the GPU worker downloads.
         #
-        # CDN > the Stream library's pull zone > Security > Token
-        # Authentication. It is per pull zone, and it is NOT any of the three
-        # other Bunny credentials it is easy to reach for instead:
+        #   CDN > the pull zone for this Stream library > Security
+        #       > Token Authentication > URL Token Authentication Key
         #
-        #   Stream library > Security "Token Authentication Key"
-        #       signs iframe.mediadelivery.net embed views, as
-        #       SHA256_HEX(key + video_id + expires). It has no effect on a
-        #       direct file URL, and a URL signed with it is refused exactly
-        #       like an unsigned one.
-        #   BUNNY_STREAM_API_KEY
-        #       the management API. Never a signing key.
-        #   The account API key
-        #       account-wide. Never a signing key.
-        #
-        # Unset means URLs are left unsigned, which is correct for a zone with
-        # token authentication switched off.
-        self.bunny_token_auth_key = env("BUNNY_STREAM_TOKEN_AUTH_KEY", "")
+        # BUNNY_STREAM_TOKEN_AUTH_KEY is accepted as an older name for the same
+        # thing, so a deployment that already sets it keeps working.
+        self.bunny_token_auth_key = (
+            env("BUNNY_STREAM_PULL_ZONE_TOKEN_KEY", "")
+            or env("BUNNY_STREAM_TOKEN_AUTH_KEY", "")
+        )
 
-        # "advanced" (HMAC-SHA256, the current default for new zones) or
-        # "basic" (MD5). Bunny has no other format.
+        # The Stream library's own token key, which signs *embed views* on
+        # iframe.mediadelivery.net as SHA256_HEX(key + video_id + expires).
+        #
+        # Read here only so the two can be told apart. It is the wrong key for
+        # a direct file URL, and a URL signed with it is refused exactly like
+        # an unsigned one — an identical 403, with nothing to say which of the
+        # two credentials was the wrong one. `bunny_key_warning` below turns
+        # that silence into a sentence.
+        self.bunny_embed_token_key = env("BUNNY_STREAM_TOKEN_KEY", "")
+
         self.bunny_token_auth_algorithm = env(
             "BUNNY_TOKEN_AUTH_ALGORITHM", "advanced"
         ).strip().lower()
@@ -378,6 +379,45 @@ class Settings:
         base = self.runpod_api_base.strip().rstrip("/")
 
         return f"{base}/{self.runpod_endpoint_id.strip()}", self.runpod_api_key
+
+    def bunny_key_warning(self):
+        """Why signing will not work, if it will not. None when it is fine.
+
+        Both failures below produce the same 403 as sending no token at all, so
+        without this the only symptom is a refused download and no way to tell
+        which of several similarly named Bunny credentials was used.
+        """
+
+        if not self.bunny_token_auth_key:
+
+            if self.bunny_embed_token_key:
+                return (
+                    "BUNNY_STREAM_PULL_ZONE_TOKEN_KEY is not set, but "
+                    "BUNNY_STREAM_TOKEN_KEY is. Those are different keys: the "
+                    "one that is set signs iframe embed views, and cannot sign "
+                    "a direct file URL. Set the pull zone's URL Token "
+                    "Authentication Key (CDN > the pull zone > Security)."
+                )
+
+            return (
+                "BUNNY_STREAM_PULL_ZONE_TOKEN_KEY is not set, so media URLs "
+                "are sent unsigned. That is correct only if the pull zone has "
+                "token authentication switched off."
+            )
+
+        if (
+            self.bunny_embed_token_key
+            and self.bunny_token_auth_key == self.bunny_embed_token_key
+        ):
+            return (
+                "BUNNY_STREAM_PULL_ZONE_TOKEN_KEY and BUNNY_STREAM_TOKEN_KEY "
+                "hold the same value, so the embed view key is being used to "
+                "sign direct file URLs. Bunny will refuse them. The pull "
+                "zone's key is a different value, under CDN > the pull zone > "
+                "Security > Token Authentication."
+            )
+
+        return None
 
     def bunny_media_hosts(self):
         """Hostnames the GPU worker is allowed to fetch media from.

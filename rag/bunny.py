@@ -704,8 +704,9 @@ def check_direct_access(guid, referer=None):
 
     if not key:
         raise BunnyError(
-            "BUNNY_STREAM_TOKEN_AUTH_KEY is not set, so there is no signed "
-            "URL to compare against. " + _WHERE_THE_KEY_IS
+            get_settings().bunny_key_warning()
+            + " There is no signed URL to compare against."
+            + _WHERE_THE_KEY_IS
         )
 
     if not referer:
@@ -726,6 +727,11 @@ def check_direct_access(guid, referer=None):
     headers = {"Referer": referer.rstrip("/") + "/"}
 
     signed = sign_url(unsigned)
+
+    warning = settings.bunny_key_warning()
+
+    if warning:
+        print(f"WARNING  {warning}\n")
 
     print(f"video    {guid}")
     print(f"path     {urlparse(unsigned).path}")
@@ -822,15 +828,16 @@ def check_token_auth(guid):
     print(f"path     {urlparse(unsigned).path}")
     print(f"host     {urlparse(unsigned).hostname}")
     print(f"mp4      {mp4}")
-    print(f"key      {'set' if key else 'NOT SET (BUNNY_STREAM_TOKEN_AUTH_KEY)'}")
+    print(f"key      {'set' if key else 'NOT SET'}"
+          f"  (BUNNY_STREAM_PULL_ZONE_TOKEN_KEY)")
     print()
 
     _probe("unsigned", unsigned)
 
     if not key:
         print(
-            "\nSet BUNNY_STREAM_TOKEN_AUTH_KEY to test the signed modes.\n"
-            + _WHERE_THE_KEY_IS
+            "\nSet BUNNY_STREAM_PULL_ZONE_TOKEN_KEY to test the signed "
+            "modes.\n" + _WHERE_THE_KEY_IS
         )
         return 1
 
@@ -861,13 +868,14 @@ def check_token_auth(guid):
 
 
 _WHERE_THE_KEY_IS = """
-The key that signs direct file URLs is the pull zone's:
+The key that signs direct file URLs is the pull zone's, and it belongs in
+BUNNY_STREAM_PULL_ZONE_TOKEN_KEY:
 
     CDN  >  the pull zone for this Stream library  >  Security
          >  Token Authentication  >  URL Token Authentication Key
 
-NOT the one on the Stream library's own Security page. That one is the embed
-view token key, it signs iframe.mediadelivery.net URLs as
+NOT BUNNY_STREAM_TOKEN_KEY, which is the Stream library's embed view token key.
+That one signs iframe.mediadelivery.net URLs as
 SHA256_HEX(key + video_id + expires), and a direct file URL signed with it is
 refused exactly like an unsigned one.
 """

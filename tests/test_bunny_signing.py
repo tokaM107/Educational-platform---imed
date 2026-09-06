@@ -688,3 +688,124 @@ def test_no_token_path_or_ip_parameters_are_sent():
 
     assert "token_path" not in signed
     assert "token_ip" not in signed
+
+
+# ------------------------------------------------------------------
+# Which environment variable holds which key
+# ------------------------------------------------------------------
+#
+# Bunny hands out several similarly named credentials and refuses the wrong one
+# with the same 403 as no credential at all. These pin which variable this code
+# signs with, because the symptom cannot tell you.
+
+PULL_ZONE_KEY = "the-pull-zone-url-token-authentication-key"
+
+EMBED_KEY = "the-stream-library-embed-view-token-key"
+
+
+def settings_with(monkeypatch, **environment):
+    from app.config import Settings
+
+    for name in (
+        "BUNNY_STREAM_PULL_ZONE_TOKEN_KEY",
+        "BUNNY_STREAM_TOKEN_AUTH_KEY",
+        "BUNNY_STREAM_TOKEN_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    return Settings()
+
+
+def test_the_pull_zone_key_is_what_signs_media_urls(monkeypatch):
+    settings = settings_with(
+        monkeypatch,
+        BUNNY_STREAM_PULL_ZONE_TOKEN_KEY=PULL_ZONE_KEY,
+        BUNNY_STREAM_TOKEN_KEY=EMBED_KEY,
+    )
+
+    assert settings.bunny_token_auth_key == PULL_ZONE_KEY
+
+
+def test_the_embed_key_is_never_used_for_signing(monkeypatch):
+    """It signs iframe views; a file URL signed with it is refused."""
+
+    settings = settings_with(monkeypatch, BUNNY_STREAM_TOKEN_KEY=EMBED_KEY)
+
+    assert settings.bunny_token_auth_key == ""
+
+
+def test_the_older_variable_name_still_works(monkeypatch):
+    """A deployment that already set it must not break on this rename."""
+
+    settings = settings_with(
+        monkeypatch, BUNNY_STREAM_TOKEN_AUTH_KEY=PULL_ZONE_KEY
+    )
+
+    assert settings.bunny_token_auth_key == PULL_ZONE_KEY
+
+
+def test_the_pull_zone_variable_wins_over_the_older_one(monkeypatch):
+    settings = settings_with(
+        monkeypatch,
+        BUNNY_STREAM_PULL_ZONE_TOKEN_KEY=PULL_ZONE_KEY,
+        BUNNY_STREAM_TOKEN_AUTH_KEY="something-stale",
+    )
+
+    assert settings.bunny_token_auth_key == PULL_ZONE_KEY
+
+
+# -------------------------
+# Saying so out loud
+# -------------------------
+
+
+def test_having_only_the_embed_key_is_called_out(monkeypatch):
+    """The exact mix-up that produced 403 for every signing mode."""
+
+    settings = settings_with(monkeypatch, BUNNY_STREAM_TOKEN_KEY=EMBED_KEY)
+
+    warning = settings.bunny_key_warning()
+
+    assert "BUNNY_STREAM_PULL_ZONE_TOKEN_KEY is not set" in warning
+    assert "embed" in warning
+
+
+def test_the_two_keys_holding_one_value_is_called_out(monkeypatch):
+    settings = settings_with(
+        monkeypatch,
+        BUNNY_STREAM_PULL_ZONE_TOKEN_KEY=EMBED_KEY,
+        BUNNY_STREAM_TOKEN_KEY=EMBED_KEY,
+    )
+
+    assert "same value" in settings.bunny_key_warning()
+
+
+def test_no_key_at_all_says_urls_go_unsigned(monkeypatch):
+    settings = settings_with(monkeypatch)
+
+    assert "unsigned" in settings.bunny_key_warning()
+
+
+def test_a_correct_configuration_warns_about_nothing(monkeypatch):
+    settings = settings_with(
+        monkeypatch,
+        BUNNY_STREAM_PULL_ZONE_TOKEN_KEY=PULL_ZONE_KEY,
+        BUNNY_STREAM_TOKEN_KEY=EMBED_KEY,
+    )
+
+    assert settings.bunny_key_warning() is None
+
+
+def test_no_key_is_ever_printed_in_a_warning(monkeypatch):
+    """A warning about a credential must not quote the credential."""
+
+    settings = settings_with(
+        monkeypatch,
+        BUNNY_STREAM_PULL_ZONE_TOKEN_KEY=EMBED_KEY,
+        BUNNY_STREAM_TOKEN_KEY=EMBED_KEY,
+    )
+
+    assert EMBED_KEY not in settings.bunny_key_warning()

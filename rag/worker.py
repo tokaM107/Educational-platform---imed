@@ -527,6 +527,15 @@ def run_forever(idle_seconds=IDLE_SECONDS):
         settings.runpod_poll_interval_seconds,
     )
 
+    # Said once at start rather than discovered as a 403 per lecture. Bunny
+    # answers identically for an unsigned URL, a URL signed with the embed key
+    # and a URL signed with the wrong algorithm, so the configuration mistake
+    # is invisible from the response.
+    warning = settings.bunny_key_warning()
+
+    if warning:
+        logger.warning("Bunny signing: %s", warning)
+
     while True:
 
         with connection() as conn:
