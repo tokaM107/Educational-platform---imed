@@ -429,20 +429,15 @@ def sign_url(url, ttl_seconds=None, key=None, algorithm=None, now=None):
     return urlunparse(parsed._replace(query=query))
 
 
-def redact(url):
-    """A media URL safe to log: the token and expiry removed.
+def redact(text):
+    """Media URLs in `text`, with their query credentials removed.
 
-    The token is not the security key and cannot be reversed into it, but it is
-    a bearer credential for one video for as long as it lives, and job logs are
-    read by more people and kept for longer than that.
+    Delegates to rag.media_url, which is the copy the GPU image carries. Two
+    implementations of one rule is how the host allowlist drifted apart between
+    the server and the worker; there is no reason to repeat it for redaction.
     """
 
-    if not url or not isinstance(url, str):
-        return url
-
-    parsed = urlparse(url)
-
-    return urlunparse(parsed._replace(query="")) + ("?…" if parsed.query else "")
+    return media_url.redact(text)
 
 
 def playlist_url(video, sign=True):
