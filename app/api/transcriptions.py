@@ -13,19 +13,23 @@ waited for the GPU would hold an HTTP connection open across a cold start, a
 queue wait and an hour of audio, and would give its caller no way to tell a
 failed transcription from a successful one whose response was lost.
 
-Authenticated with the application's own bearer token, the same dependency the
-chat endpoints use: the caller reaches this having already logged the user in,
-so there is no second credential to carry. What keeps the GPU bill bounded is
-therefore not the identity but the queue: a video already transcribed is never
-re-run, one already in flight returns its existing job, and re-transcribing on
-purpose needs an explicit `force`.
+Authenticated with the application's own bearer token — no second credential,
+since the caller reaches this having already logged the user in — and
+restricted to doctors. Starting a transcription spends GPU time, which is not
+something a student account should be able to do on the platform's bill; a
+student's own path to a transcript is asking a question about a lecture that
+has already been through the pipeline.
+
+The queue bounds the spend independently of who asks: a video already
+transcribed is never re-run, one already in flight returns its existing job,
+and re-transcribing on purpose needs an explicit `force`.
 """
 
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
-from app.api.deps import get_conn, get_current_user
+from app.api.deps import get_conn, require_doctor
 from app.schemas.transcription import TranscriptionRequest, TranscriptionResponse
 from app.services import transcription_jobs
 
@@ -120,7 +124,7 @@ def start_transcription(
     body: TranscriptionRequest,
     response: Response,
     conn=Depends(get_conn),
-    current_user=Depends(get_current_user),
+    current_user=Depends(require_doctor),
 ):
     """Queue this video for transcription, or report the job already doing it.
 

@@ -21,11 +21,18 @@ from tests.fake_db import FakeConn
 
 GUID = "bunny-guid-17"
 
-USER = {"id": 7, "name": "Toqa", "email": "t@example.com", "role": "student"}
+DOCTOR = {"id": 7, "name": "Toqa", "email": "t@example.com", "role": "doctor"}
+
+STUDENT = {"id": 8, "name": "Ali", "email": "a@example.com", "role": "student"}
 
 
-def make_client(conn, user=USER):
-    """The endpoint behind the same bearer dependency the chat endpoints use."""
+def make_client(conn, user=DOCTOR):
+    """The endpoint behind its real authorization dependency.
+
+    `get_current_user` is overridden rather than `require_doctor`, so the role
+    check itself still runs — overriding the outer dependency would replace the
+    very thing these tests are about.
+    """
 
     application = FastAPI()
     application.include_router(transcriptions.router)
@@ -37,7 +44,7 @@ def make_client(conn, user=USER):
     return TestClient(application)
 
 
-def post(conn, body=None, user=USER):
+def post(conn, body=None, user=DOCTOR):
     return make_client(conn, user).post(
         "/api/transcriptions",
         json={"video_id": 17} if body is None else body,
@@ -110,6 +117,34 @@ def test_an_unauthenticated_request_is_refused():
     )
 
     assert response.status_code == 401
+
+
+def test_a_student_may_not_start_a_transcription():
+    """403, not 401: they proved who they are and the answer is still no.
+
+    Transcribing spends GPU time on the platform's bill. A student's route to a
+    transcript is asking about a lecture that has already been through the
+    pipeline, not starting a run.
+    """
+
+    conn = FakeConn(responder(jobs=[[], job_row()]))
+
+    response = post(conn, user=STUDENT)
+
+    assert response.status_code == 403
+
+    assert not any(
+        "INSERT INTO transcription_jobs" in sql for sql, _ in conn.calls
+    )
+
+
+def test_a_doctor_may_start_a_transcription():
+    conn = FakeConn(responder(jobs=[[], job_row()]))
+
+    response = post(conn, user=DOCTOR)
+
+    assert response.status_code == 202
+    assert response.json()["queued"] is True
 
 
 # -------------------------
