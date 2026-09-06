@@ -200,6 +200,10 @@ class Settings:
         self.bunny_api_key = env("BUNNY_STREAM_API_KEY", "")
         self.bunny_cdn_hostname = env("BUNNY_STREAM_CDN_HOSTNAME", "")
 
+        # Additional pull zones, comma-separated, for a deployment serving more
+        # than one. Read on both sides so the two allowlists stay identical.
+        self.bunny_media_hosts_extra = env("BUNNY_MEDIA_HOSTS", "")
+
         # Bunny Stream webhooks carry no signature, so the only thing that
         # distinguishes a real callback from anybody who guessed the path is a
         # secret we put in the URL ourselves. Unset means the endpoint refuses
@@ -333,16 +337,19 @@ class Settings:
         Hugging Face token and an API key, so an unchecked URL is a
         server-side request forgery with a GPU attached. Only the configured
         pull zone qualifies, and `video.bunnycdn.com` for API-issued links.
+
+        Built by rag.media_url rather than here, so this side and the GPU
+        worker cannot disagree about what counts as a Bunny host. They did:
+        this read BUNNY_STREAM_CDN_HOSTNAME and the worker read
+        BUNNY_MEDIA_HOSTS, so the server submitted lectures the worker then
+        refused to fetch.
         """
 
-        hosts = {"video.bunnycdn.com"}
+        from rag import media_url
 
-        hostname = self.bunny_cdn_hostname.strip().rstrip("/")
-
-        if hostname:
-            hosts.add(hostname.removeprefix("https://").removeprefix("http://"))
-
-        return hosts
+        return media_url.bunny_hosts(
+            self.bunny_cdn_hostname, self.bunny_media_hosts_extra
+        )
 
     def require_bunny(self):
         """(library_id, api_key, cdn_hostname), or a refusal naming what is missing.

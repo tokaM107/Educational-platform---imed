@@ -52,15 +52,17 @@ logger = logging.getLogger(__name__)
 # Everything this worker writes lives under here, one directory per job.
 WORK_ROOT = Path(os.getenv("TRANSCRIPTION_WORK_ROOT", "/tmp/transcription_jobs"))
 
-# Which hosts a job may point at. Comma-separated so the endpoint can serve
-# more than one pull zone without a rebuild. The worker enforces this itself
-# rather than trusting its caller: the endpoint id is not a secret, and anyone
-# who can submit a job could otherwise make this GPU fetch an internal address.
-ALLOWED_MEDIA_HOSTS = {
-    host.strip().lower()
-    for host in os.getenv("BUNNY_MEDIA_HOSTS", "video.bunnycdn.com").split(",")
-    if host.strip()
-}
+# Which hosts a job may point at. The worker enforces this itself rather than
+# trusting its caller: the endpoint id is not a secret, and anyone who can
+# submit a job could otherwise make this GPU fetch an internal address.
+#
+# Built by the same function the application server uses, from the same two
+# variables — BUNNY_STREAM_CDN_HOSTNAME for the pull zone, BUNNY_MEDIA_HOSTS
+# for any others. It used to read only the second and default to
+# video.bunnycdn.com, so an endpoint configured the documented way rejected
+# every lecture from the pull zone the server had just submitted, after the
+# GPU had already started. Both sides now compute one answer.
+ALLOWED_MEDIA_HOSTS = media_url.bunny_hosts_from_env()
 
 
 class JobInputError(Exception):
