@@ -26,6 +26,7 @@ from urllib.parse import urlencode, urlparse, urlunparse
 import requests
 
 from app.config import get_settings
+from rag import media_url
 
 
 API_ROOT = "https://video.bunnycdn.com"
@@ -597,6 +598,18 @@ def main(argv=None):
     )
     check.add_argument("guid")
 
+    direct = sub.add_parser(
+        "check-direct-access",
+        help="signed/unsigned x with/without Referer, to separate token "
+             "authentication from Block Direct URL File Access",
+    )
+    direct.add_argument("guid")
+    direct.add_argument(
+        "--referer", required=True,
+        help="a domain from the library's Allowed domains list, e.g. "
+             "app.example.com",
+    )
+
     args = parser.parse_args(argv)
 
     # A missing key or a rejected request is an ordinary thing to get wrong
@@ -605,6 +618,192 @@ def main(argv=None):
         return _run(args)
     except (BunnyError, RuntimeError) as error:
         raise SystemExit(f"bunny: {error}")
+
+
+def diagnostic_url(guid):
+    """The unsigned rendition URL to probe, and what is known about MP4.
+
+    The Stream API is asked first, because it knows which renditions exist. It
+    is not required though: these tools are most useful when something is
+    misconfigured, and refusing to run because the API key is also wrong would
+    be refusing exactly when they are wanted.
+    """
+
+    try:
+        video = get_video(guid)
+
+        return (
+            rendition_url(video, prefer="lowest", sign=False),
+            "yes" if video.get("hasMP4Fallback") else "NO — HLS only",
+        )
+
+    except (BunnyError, RuntimeError, requests.RequestException) as error:
+        hostname = get_settings().bunny_cdn_hostname.strip().rstrip("/")
+
+        if not hostname:
+            raise BunnyError(
+                "BUNNY_STREAM_CDN_HOSTNAME is not set, and the Stream API "
+                f"could not be reached either: {error}"
+            ) from error
+
+        return (
+            f"https://{hostname}/{guid}/play_240p.mp4",
+            f"unknown (Stream API unavailable: {error})",
+        )
+
+
+def _probe(label, url, headers=None):
+    """One ranged request. Returns the status code, or None if unreachable.
+
+    A byte, not a lecture: `Range: bytes=0-0` is enough to learn whether the
+    CDN would serve this URL, and costs nothing if it would.
+    """
+
+    try:
+        response = requests.get(
+            url,
+            headers={"Range": "bytes=0-0", **(headers or {})},
+            timeout=30,
+            stream=True,
+        )
+        response.close()
+        status = response.status_code
+
+    except requests.RequestException as error:
+        print(f"  {label:28s} could not reach the CDN: {error}")
+        return None
+
+    print(f"  {label:28s} HTTP {status}  "
+          f"{'ACCEPTED' if status < 400 else 'refused'}")
+
+    return status
+
+
+def check_direct_access(guid, referer=None):
+    """Does Block Direct URL File Access still require a Referer when the token
+    is valid?
+
+    Four probes over one MP4 URL, which is the whole experiment:
+
+        unsigned, no Referer        the state RunPod is in today
+        unsigned, allowed Referer   isolates the referer allowlist
+        signed,   no Referer        what the worker would send
+        signed,   allowed Referer   both credentials at once
+
+    Between them these separate the two protections. Signing cannot fix a
+    referer requirement and a Referer cannot fix a bad token, so which pair
+    succeeds says which mechanism is refusing.
+
+    Prints probe names and HTTP statuses only — never the key, never a token.
+    """
+
+    settings = get_settings()
+
+    unsigned, mp4 = diagnostic_url(guid)
+
+    # The same allowlist the worker enforces. A diagnostic that fetched
+    # whatever it was handed would be the SSRF hole this check exists to close.
+    media_url.check(unsigned, settings.bunny_media_hosts())
+
+    key = settings.bunny_token_auth_key
+
+    if not key:
+        raise BunnyError(
+            "BUNNY_STREAM_TOKEN_AUTH_KEY is not set, so there is no signed "
+            "URL to compare against. " + _WHERE_THE_KEY_IS
+        )
+
+    if not referer:
+        raise BunnyError(
+            "Pass --referer with one of the domains on the Stream library's "
+            "Allowed domains list (Stream -> your library -> Security). It is "
+            "sent as the Referer header, which is what Block Direct URL File "
+            "Access checks."
+        )
+
+    referer = referer.strip()
+
+    if "//" not in referer:
+        referer = f"https://{referer}"
+
+    # Bunny matches the domain of the Referer, and a browser sends a page URL
+    # rather than a bare origin, so this is sent the way a browser would.
+    headers = {"Referer": referer.rstrip("/") + "/"}
+
+    signed = sign_url(unsigned)
+
+    print(f"video    {guid}")
+    print(f"path     {urlparse(unsigned).path}")
+    print(f"host     {urlparse(unsigned).hostname}")
+    print(f"mp4      {mp4}")
+    print(f"mode     {token_mode()}")
+    print(f"referer  {headers['Referer']}")
+    print()
+
+    results = {
+        "unsigned, no referer": _probe("1  unsigned, no Referer", unsigned),
+        "unsigned, referer": _probe(
+            "2  unsigned, allowed Referer", unsigned, headers
+        ),
+        "signed, no referer": _probe("3  signed, no Referer", signed),
+        "signed, referer": _probe(
+            "4  signed, allowed Referer", signed, headers
+        ),
+    }
+
+    print()
+    print(_interpret(results))
+
+    return 0 if (results["signed, no referer"] or 599) < 400 else 1
+
+
+def _interpret(results):
+    """Say what the four statuses mean, so the numbers do not have to be read."""
+
+    def ok(name):
+        status = results[name]
+        return status is not None and status < 400
+
+    signed_alone = ok("signed, no referer")
+    referer_alone = ok("unsigned, referer")
+    both = ok("signed, referer")
+
+    if signed_alone:
+        return (
+            "A valid token is sufficient on its own. RunPod can read these "
+            "URLs with no Referer, which is what the worker already sends — "
+            "if production still fails, the failure is elsewhere."
+        )
+
+    if both and not signed_alone:
+        return (
+            "Token AND Referer are both required: the signed URL works only "
+            "when a Referer is also present. Block Direct URL File Access is "
+            "refusing requests that carry no Referer even with a valid token, "
+            "so signing alone cannot fix RunPod. The options are to turn that "
+            "setting off and rely on token authentication, or to have the GPU "
+            "worker send a Referer — a decision to make deliberately, not a "
+            "change this tool should make."
+        )
+
+    if referer_alone and not both:
+        return (
+            "The Referer is accepted and the token is not, on the same URL. "
+            "That points at the key or the mode rather than at Block Direct "
+            "URL File Access. " + _WHERE_THE_KEY_IS
+        )
+
+    if not referer_alone and not both:
+        return (
+            "Nothing was accepted, including a request with an allowed "
+            "Referer — so this URL is refused for a reason that is neither "
+            "the token nor the referer allowlist. Check that the domain "
+            "passed to --referer is really on the library's Allowed domains "
+            "list, and that the video has an MP4 fallback and finished "
+            "encoding."
+        )
+
+    return "Inconclusive; the four statuses above are the raw result."
 
 
 def check_token_auth(guid):
@@ -620,26 +819,7 @@ def check_token_auth(guid):
 
     settings = get_settings()
 
-    # The Stream API is asked first, because it knows which renditions exist.
-    # It is not required though: this tool is most useful when something is
-    # misconfigured, and refusing to run because the API key is also wrong
-    # would be refusing exactly when it is wanted.
-    try:
-        video = get_video(guid)
-        unsigned = rendition_url(video, prefer="lowest", sign=False)
-        mp4 = "yes" if video.get("hasMP4Fallback") else "NO — HLS only"
-
-    except (BunnyError, RuntimeError, requests.RequestException) as error:
-        hostname = settings.bunny_cdn_hostname.strip().rstrip("/")
-
-        if not hostname:
-            raise BunnyError(
-                "BUNNY_STREAM_CDN_HOSTNAME is not set, and the Stream API "
-                f"could not be reached either: {error}"
-            ) from error
-
-        unsigned = f"https://{hostname}/{guid}/play_240p.mp4"
-        mp4 = f"unknown (Stream API unavailable: {error})"
+    unsigned, mp4 = diagnostic_url(guid)
 
     key = settings.bunny_token_auth_key
 
@@ -650,22 +830,7 @@ def check_token_auth(guid):
     print(f"key      {'set' if key else 'NOT SET (BUNNY_STREAM_TOKEN_AUTH_KEY)'}")
     print()
 
-    def probe(label, url):
-        try:
-            response = requests.get(
-                url, headers={"Range": "bytes=0-0"}, timeout=30, stream=True
-            )
-            response.close()
-            status = response.status_code
-        except requests.RequestException as error:
-            print(f"  {label:10s} could not reach the CDN: {error}")
-            return None
-
-        print(f"  {label:10s} HTTP {status}  "
-              f"{'ACCEPTED' if status < 400 else 'refused'}")
-        return status
-
-    probe("unsigned", unsigned)
+    _probe("unsigned", unsigned)
 
     if not key:
         print(
@@ -676,7 +841,7 @@ def check_token_auth(guid):
 
     accepted = [
         mode for mode in TOKEN_MODES
-        if (probe(mode, sign_url(unsigned, algorithm=mode)) or 599) < 400
+        if (_probe(mode, sign_url(unsigned, algorithm=mode)) or 599) < 400
     ]
 
     print()
@@ -718,6 +883,10 @@ def _run(args):
     if args.command == "check-token-auth":
 
         return check_token_auth(args.guid)
+
+    if args.command == "check-direct-access":
+
+        return check_direct_access(args.guid, referer=args.referer)
 
     if args.command == "show":
 
