@@ -204,16 +204,30 @@ class Settings:
         # than one. Read on both sides so the two allowlists stay identical.
         self.bunny_media_hosts_extra = env("BUNNY_MEDIA_HOSTS", "")
 
-        # The pull zone's token authentication key, from the Bunny dashboard
-        # (Stream library -> Security). Not the Stream API key: that one is
-        # account-wide and must never be used to sign a URL a third party will
-        # hold. Unset means URLs are left unsigned, which is correct for a zone
-        # with token authentication switched off.
+        # The pull zone's URL Token Authentication Key.
+        #
+        # CDN > the Stream library's pull zone > Security > Token
+        # Authentication. It is per pull zone, and it is NOT any of the three
+        # other Bunny credentials it is easy to reach for instead:
+        #
+        #   Stream library > Security "Token Authentication Key"
+        #       signs iframe.mediadelivery.net embed views, as
+        #       SHA256_HEX(key + video_id + expires). It has no effect on a
+        #       direct file URL, and a URL signed with it is refused exactly
+        #       like an unsigned one.
+        #   BUNNY_STREAM_API_KEY
+        #       the management API. Never a signing key.
+        #   The account API key
+        #       account-wide. Never a signing key.
+        #
+        # Unset means URLs are left unsigned, which is correct for a zone with
+        # token authentication switched off.
         self.bunny_token_auth_key = env("BUNNY_STREAM_TOKEN_AUTH_KEY", "")
 
-        # Which of Bunny's two documented token forms the zone expects.
+        # "advanced" (HMAC-SHA256, the current default for new zones) or
+        # "basic" (MD5). Bunny has no other format.
         self.bunny_token_auth_algorithm = env(
-            "BUNNY_TOKEN_AUTH_ALGORITHM", "sha256"
+            "BUNNY_TOKEN_AUTH_ALGORITHM", "advanced"
         ).strip().lower()
 
         # Bunny Stream webhooks carry no signature, so the only thing that

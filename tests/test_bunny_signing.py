@@ -38,7 +38,7 @@ def bunny_settings(monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "bunny_cdn_hostname", HOST)
     monkeypatch.setattr(settings, "bunny_token_auth_key", KEY)
-    monkeypatch.setattr(settings, "bunny_token_auth_algorithm", "sha256")
+    monkeypatch.setattr(settings, "bunny_token_auth_algorithm", "advanced")
     monkeypatch.setattr(settings, "bunny_media_url_ttl_seconds", 1800)
     return settings
 
@@ -60,41 +60,27 @@ def test_a_signed_url_carries_a_token_and_an_expiry():
     assert set(query(signed)) == {"token", "expires"}
 
 
-def test_the_token_matches_bunnys_documented_construction():
-    """Base64(SHA256(key + path + expires)), made URL-safe. Not invented here."""
-
-    signed = bunny.sign_url(URL, ttl_seconds=3600, now=1_000_000)
-
-    path = f"/{GUID}/play_240p.mp4"
-    expires = 1_000_000 + 3600
-
-    expected = (
-        b64encode(hashlib.sha256(f"{KEY}{path}{expires}".encode()).digest())
-        .decode().replace("+", "-").replace("/", "_").replace("=", "")
-    )
-
-    assert query(signed) == {"token": expected, "expires": str(expires)}
-
-
-def test_the_legacy_md5_form_is_available_for_zones_that_use_it(monkeypatch):
-    monkeypatch.setattr(get_settings(), "bunny_token_auth_algorithm", "md5")
-
-    signed = bunny.sign_url(URL, ttl_seconds=3600, now=1_000_000)
-
-    path = f"/{GUID}/play_240p.mp4"
-    expected = (
-        b64encode(hashlib.md5(f"{KEY}{path}1003600".encode()).digest())
-        .decode().replace("+", "-").replace("/", "_").replace("=", "")
-    )
-
-    assert query(signed)["token"] == expected
-
-
-def test_an_unknown_algorithm_is_refused_rather_than_guessed(monkeypatch):
+def test_an_unknown_mode_is_refused_rather_than_guessed(monkeypatch):
     monkeypatch.setattr(get_settings(), "bunny_token_auth_algorithm", "sha1")
 
     with pytest.raises(bunny.BunnyError):
         bunny.sign_url(URL)
+
+
+def test_plain_sha256_is_refused_because_bunny_has_no_such_format(monkeypatch):
+    """The bug this file exists for: it was the default, and it never worked.
+
+    Bunny signs with MD5 (basic) or HMAC-SHA256 (advanced). A bare
+    SHA256(key + path + expires) is neither, so a zone refuses it exactly as it
+    refuses an unsigned URL — which is why every mode appeared to fail at once.
+    """
+
+    monkeypatch.setattr(get_settings(), "bunny_token_auth_algorithm", "sha256")
+
+    with pytest.raises(bunny.BunnyError) as caught:
+        bunny.sign_url(URL)
+
+    assert "not a Bunny token format" in str(caught.value)
 
 
 def test_the_url_is_left_alone_when_no_key_is_configured(monkeypatch):
@@ -427,11 +413,11 @@ def test_a_permanent_failure_keeps_the_error_and_the_identifiers(jobs_db):
 
 
 def test_the_advanced_form_matches_bunnys_construction(monkeypatch):
-    """"HS256-" + Base64URL(HMAC-SHA256(key, path + expires))."""
+    """HS256- + Base64URL(HMAC-SHA256(key, path + expires))."""
 
     import hmac as hmac_module
 
-    monkeypatch.setattr(get_settings(), "bunny_token_auth_algorithm", "hmac")
+    monkeypatch.setattr(get_settings(), "bunny_token_auth_algorithm", "advanced")
 
     signed = bunny.sign_url(URL, ttl_seconds=1800, now=1_000_000)
 
@@ -451,12 +437,12 @@ def test_the_advanced_form_matches_bunnys_construction(monkeypatch):
 
 
 def test_the_advanced_form_is_marked_so_bunny_recognises_it(monkeypatch):
-    monkeypatch.setattr(get_settings(), "bunny_token_auth_algorithm", "hmac")
+    monkeypatch.setattr(get_settings(), "bunny_token_auth_algorithm", "advanced")
 
     assert query(bunny.sign_url(URL))["token"].startswith("HS256-")
 
 
-@pytest.mark.parametrize("algorithm", ["hmac", "sha256", "md5"])
+@pytest.mark.parametrize("algorithm", ["advanced", "basic"])
 def test_every_supported_form_signs_the_path_and_not_the_query(algorithm):
     """A token must not be widenable by appending parameters."""
 
@@ -466,7 +452,7 @@ def test_every_supported_form_signs_the_path_and_not_the_query(algorithm):
     assert query(a)["token"] == query(b)["token"]
 
 
-@pytest.mark.parametrize("algorithm", ["hmac", "sha256", "md5"])
+@pytest.mark.parametrize("algorithm", ["advanced", "basic"])
 def test_no_form_leaks_the_key(algorithm):
     assert KEY not in bunny.sign_url(URL, algorithm=algorithm)
 
@@ -595,3 +581,110 @@ def test_a_video_with_no_mp4_fallback_is_refused_before_a_gpu_starts(monkeypatch
         worker.media_url_for(GUID)
 
     assert "MP4 fallback" in str(caught.value)
+
+
+# ------------------------------------------------------------------
+# Fixed vectors
+# ------------------------------------------------------------------
+#
+# Literal expected tokens, not recomputed from the same formula the code uses.
+# A test that re-derives the answer the same way passes even when both sides
+# change together, which is exactly the failure that shipped: the module signed
+# with a scheme Bunny has never accepted, and every test agreed with it.
+
+VECTOR_KEY = "bunny-url-token-authentication-key"
+
+VECTOR_PATH = f"/{GUID}/play_240p.mp4"
+
+VECTOR_EXPIRES = 1800000000
+
+VECTORS = {
+    "advanced": "HS256-mCafhnEEIsyfBwI_0RvBm8-_QTHwM5NoWdwOmnpRemA",
+    "basic": "BYSlLeb4H5FJD-eQ8hOpsg",
+}
+
+
+@pytest.mark.parametrize("mode", sorted(VECTORS))
+def test_the_token_matches_a_fixed_vector(mode):
+    signed = bunny.sign_url(
+        f"https://{HOST}{VECTOR_PATH}",
+        key=VECTOR_KEY,
+        algorithm=mode,
+        ttl_seconds=1,
+        now=VECTOR_EXPIRES - 1,
+    )
+
+    assert query(signed)["token"] == VECTORS[mode]
+
+
+def test_the_advanced_vector_is_an_hmac_and_the_basic_one_is_not():
+    """They must not be the same construction under two names."""
+
+    assert VECTORS["advanced"].startswith("HS256-")
+    assert not VECTORS["basic"].startswith("HS256-")
+    assert VECTORS["advanced"] != VECTORS["basic"]
+
+
+# ------------------------------------------------------------------
+# The exact URL Bunny is asked for
+# ------------------------------------------------------------------
+
+
+def test_the_signed_path_is_the_rendition_path_exactly():
+    """/<video-guid>/play_240p.mp4 — what is signed and what is requested."""
+
+    from urllib.parse import urlparse
+
+    signed = bunny.audio_source_url(video())
+
+    assert urlparse(signed).path == f"/{GUID}/play_240p.mp4"
+
+
+def test_the_token_covers_that_path_and_no_other():
+    """Signing the wrong path is indistinguishable from not signing at all."""
+
+    signed = bunny.sign_url(URL, ttl_seconds=1, now=VECTOR_EXPIRES - 1,
+                            key=VECTOR_KEY, algorithm="advanced")
+
+    assert query(signed)["token"] == VECTORS["advanced"]
+
+    # The same file one directory up must not produce the same token.
+    other = bunny.sign_url(
+        f"https://{HOST}/play_240p.mp4",
+        ttl_seconds=1, now=VECTOR_EXPIRES - 1,
+        key=VECTOR_KEY, algorithm="advanced",
+    )
+
+    assert query(other)["token"] != VECTORS["advanced"]
+
+
+def test_the_query_string_is_exactly_token_and_expires():
+    """Bunny names these two parameters; anything else is not part of the spec."""
+
+    from urllib.parse import parse_qsl, urlparse
+
+    pairs = parse_qsl(urlparse(bunny.sign_url(URL)).query)
+
+    assert [name for name, _ in pairs] == ["token", "expires"]
+
+
+def test_expires_is_whole_seconds_since_the_epoch():
+    """Not milliseconds, and not a float — Bunny compares it as an integer."""
+
+    value = query(bunny.sign_url(URL, now=1_000_000.75))["expires"]
+
+    assert value.isdigit()
+    assert int(value) == 1_000_000 + 1800
+
+
+def test_no_token_path_or_ip_parameters_are_sent():
+    """Neither is signed, so sending either would invalidate the token.
+
+    No client IP in particular: RunPod's workers have no stable egress address,
+    so a token bound to one would be refused for the machine that downloads it.
+    """
+
+    signed = bunny.sign_url(URL)
+
+    assert "token_path" not in signed
+    assert "token_ip" not in signed

@@ -303,17 +303,37 @@ def resolutions(video):
 # The security key never leaves this process. What travels is the token, which
 # is a hash -- RunPod is given a URL that expires and nothing else.
 
-# Bunny documents three token forms, and a zone is configured for exactly one.
-# All three are here because they are indistinguishable from outside: the wrong
-# one is refused with the same 403 as no token at all, so a deployment cannot
-# tell by looking which it needs. `python -m rag.bunny --check-token-auth`
-# below asks the CDN and settles it in one command.
+# Bunny's two documented CDN token-authentication modes, named as Bunny names
+# them. This is *pull zone* token authentication, which is what protects direct
+# file URLs on vz-….b-cdn.net — MP4 fallbacks, HLS playlists and segments,
+# thumbnails and previews. It is not the Stream embed token, which signs
+# SHA256_HEX(key + video_id + expires) for iframe.mediadelivery.net and has no
+# effect on a direct file URL.
 #
-#   hmac     "HS256-" + Base64URL(HMAC-SHA256(key, path + expires))
-#            Bunny's advanced/V2 scheme, and what its Stream examples show.
-#   sha256   Base64URL(SHA256(key + path + expires))
-#   md5      Base64URL(MD5(key + path + expires))     legacy zones
-TOKEN_ALGORITHMS = ("hmac", "sha256", "md5")
+#   basic      Base64(MD5(key + path + expires))
+#   advanced   "HS256-" + Base64URL(HMAC-SHA256(key, path + expires))
+#
+# A plain SHA256(key + path + expires) is NOT a Bunny format. An earlier
+# version of this module offered one and defaulted to it, which is why every
+# form was refused: two of the three being wrong is expected, but the default
+# was a scheme Bunny has never accepted.
+#
+# No client IP is signed. Bunny's advanced mode can bind a token to an address
+# and marks it with a "1-" flag when it does, but RunPod's serverless workers
+# have no stable egress address, so a token bound to one would be refused for
+# the machine that actually downloads the lecture.
+TOKEN_MODES = ("advanced", "basic")
+
+# What people write in configuration, mapped onto the two real modes. The hash
+# names are accepted because that is what this module called them before.
+TOKEN_MODE_ALIASES = {
+    "advanced": "advanced",
+    "hmac": "advanced",
+    "hmac_sha256": "advanced",
+    "hs256": "advanced",
+    "basic": "basic",
+    "md5": "basic",
+}
 
 
 def _urlsafe(digest):
@@ -328,7 +348,29 @@ def _urlsafe(digest):
     )
 
 
-def _token(key, path, expires, algorithm):
+def token_mode(name=None):
+    """The Bunny mode a configured value names, or an error saying what is valid."""
+
+    name = (name or get_settings().bunny_token_auth_algorithm or "").strip().lower()
+
+    if name in TOKEN_MODE_ALIASES:
+        return TOKEN_MODE_ALIASES[name]
+
+    if name == "sha256":
+        raise BunnyError(
+            "BUNNY_TOKEN_AUTH_ALGORITHM=sha256 is not a Bunny token format. "
+            "Bunny signs with MD5 (basic) or HMAC-SHA256 (advanced). Set "
+            "'advanced' or 'basic' — `python -m rag.bunny check-token-auth "
+            "<guid>` will say which this pull zone accepts."
+        )
+
+    raise BunnyError(
+        f"unknown Bunny token mode {name!r} (expected one of "
+        f"{', '.join(TOKEN_MODES)})"
+    )
+
+
+def _token(key, path, expires, mode):
     """Bunny's token for one path and expiry.
 
     The path is signed and the query string is not, so a token is bound to one
@@ -336,24 +378,18 @@ def _token(key, path, expires, algorithm):
     another, and it cannot be widened by appending parameters.
     """
 
-    if algorithm == "hmac":
-        # The key is the HMAC key here rather than part of the message, which
-        # is the difference between this and the two hash forms below.
+    mode = token_mode(mode)
+
+    if mode == "advanced":
+        # The key is the HMAC key rather than part of the message, which is the
+        # difference between this and the basic mode below.
         digest = hmac.new(
             key.encode(), f"{path}{expires}".encode(), hashlib.sha256
         ).digest()
 
         return "HS256-" + _urlsafe(digest)
 
-    if algorithm in ("sha256", "md5"):
-        digest = hashlib.new(algorithm, f"{key}{path}{expires}".encode()).digest()
-
-        return _urlsafe(digest)
-
-    raise BunnyError(
-        f"unknown Bunny token algorithm {algorithm!r} "
-        f"(expected one of {', '.join(TOKEN_ALGORITHMS)})"
-    )
+    return _urlsafe(hashlib.md5(f"{key}{path}{expires}".encode()).digest())
 
 
 def sign_url(url, ttl_seconds=None, key=None, algorithm=None, now=None):
@@ -376,13 +412,13 @@ def sign_url(url, ttl_seconds=None, key=None, algorithm=None, now=None):
         return url
 
     ttl = ttl_seconds or settings.bunny_media_url_ttl_seconds
-    algorithm = algorithm or settings.bunny_token_auth_algorithm
+    mode = token_mode(algorithm)
 
     parsed = urlparse(url)
 
     expires = int((time.time() if now is None else now)) + int(ttl)
 
-    token = _token(key, parsed.path, expires, algorithm)
+    token = _token(key, parsed.path, expires, mode)
 
     # Appended rather than merged: these URLs are built by this module and
     # carry no query string of their own, and Bunny's basic scheme signs the
@@ -572,14 +608,13 @@ def main(argv=None):
 
 
 def check_token_auth(guid):
-    """Ask the CDN, once per token form, which one this zone accepts.
+    """Ask the CDN which token mode this pull zone accepts.
 
-    Bunny's three schemes are indistinguishable from outside: the wrong one is
-    refused with the same 403 as no token at all, so a deployment cannot tell
-    by looking which its zone was configured for. This asks for one byte with
-    each and prints what came back.
+    Bunny's two modes are indistinguishable from outside — the wrong one is
+    refused with the same 403 as no token at all — so this asks for one byte
+    with each and reports what came back.
 
-    Prints status codes and algorithm names only. The key is never printed, and
+    Prints modes and HTTP statuses only. The security key is never printed, and
     neither is a token: a token is a bearer credential for the video it names.
     """
 
@@ -609,7 +644,8 @@ def check_token_auth(guid):
     key = settings.bunny_token_auth_key
 
     print(f"video    {guid}")
-    print(f"url      {unsigned}")
+    print(f"path     {urlparse(unsigned).path}")
+    print(f"host     {urlparse(unsigned).hostname}")
     print(f"mp4      {mp4}")
     print(f"key      {'set' if key else 'NOT SET (BUNNY_STREAM_TOKEN_AUTH_KEY)'}")
     print()
@@ -625,42 +661,56 @@ def check_token_auth(guid):
             print(f"  {label:10s} could not reach the CDN: {error}")
             return None
 
-        verdict = "ACCEPTED" if status < 400 else "refused"
-        print(f"  {label:10s} HTTP {status}  {verdict}")
+        print(f"  {label:10s} HTTP {status}  "
+              f"{'ACCEPTED' if status < 400 else 'refused'}")
         return status
 
     probe("unsigned", unsigned)
 
     if not key:
         print(
-            "\nSet BUNNY_STREAM_TOKEN_AUTH_KEY to test the signed forms. "
-            "It is in the Bunny dashboard under Stream -> your library -> "
-            "Security."
+            "\nSet BUNNY_STREAM_TOKEN_AUTH_KEY to test the signed modes.\n"
+            + _WHERE_THE_KEY_IS
         )
         return 1
 
-    accepted = []
-
-    for algorithm in TOKEN_ALGORITHMS:
-        status = probe(algorithm, sign_url(unsigned, algorithm=algorithm))
-
-        if status is not None and status < 400:
-            accepted.append(algorithm)
+    accepted = [
+        mode for mode in TOKEN_MODES
+        if (probe(mode, sign_url(unsigned, algorithm=mode)) or 599) < 400
+    ]
 
     print()
 
-    if not accepted:
-        print(
-            "No token form was accepted. Either the key is wrong, or the zone "
-            "protects files by referer only — in which case token "
-            "authentication has to be switched on for the library before a "
-            "signed URL can work."
-        )
-        return 1
+    if accepted:
+        print(f"Working mode: {accepted[0]}")
+        print(f"Set BUNNY_TOKEN_AUTH_ALGORITHM={accepted[0]}")
+        return 0
 
-    print(f"Set BUNNY_TOKEN_AUTH_ALGORITHM={accepted[0]}")
+    print(
+        "Neither mode was accepted, so the key is almost certainly the wrong "
+        "one — signing is only two formulas and both were tried.\n"
+        + _WHERE_THE_KEY_IS
+        + "\nIf the key is definitely the pull zone's and both modes are still "
+        "refused, the remaining possibility is that Block Direct URL File "
+        "Access refuses a request with no Referer even when its token is "
+        "valid. Bunny does not document either way; their support can confirm "
+        "it for this library in one question."
+    )
 
-    return 0
+    return 1
+
+
+_WHERE_THE_KEY_IS = """
+The key that signs direct file URLs is the pull zone's:
+
+    CDN  >  the pull zone for this Stream library  >  Security
+         >  Token Authentication  >  URL Token Authentication Key
+
+NOT the one on the Stream library's own Security page. That one is the embed
+view token key, it signs iframe.mediadelivery.net URLs as
+SHA256_HEX(key + video_id + expires), and a direct file URL signed with it is
+refused exactly like an unsigned one.
+"""
 
 
 def _run(args):
