@@ -421,6 +421,60 @@ def requeue(conn, bunny_guid):
     return changed > 0
 
 
+def job_for_guid(conn, bunny_guid):
+    """The queue row for one Bunny video, or None.
+
+    Keyed on the guid rather than the catalog id because that is the table's
+    own key, and it is the lookup that answers "is this video already queued".
+    `status_for_video` asks the same question the other way round and can miss:
+    a job queued by the webhook before Nest wrote `video_ref` still has a null
+    video_id, and a trigger that searched by video_id would not find it and
+    would try to queue the lecture a second time.
+    """
+
+    with conn.cursor() as cur:
+
+        cur.execute(
+            """
+            SELECT id, bunny_guid, video_id, status, attempt_count, max_attempts,
+                   runpod_job_id, last_error, chunk_count
+            FROM transcription_jobs
+            WHERE bunny_guid = %s
+            """,
+            (bunny_guid,),
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        return None
+
+    return {
+        "id": row[0],
+        "bunny_guid": row[1],
+        "video_id": row[2],
+        "status": row[3],
+        "attempt_count": row[4],
+        "max_attempts": row[5],
+        "runpod_job_id": row[6],
+        "last_error": row[7],
+        "chunk_count": row[8],
+    }
+
+
+def retryable(job):
+    """Whether the worker will pick this failed job up again on its own.
+
+    The same condition as the claim query's `attempt_count < max_attempts`,
+    expressed once here so the API can tell a caller "it failed but is being
+    retried" without duplicating the rule or guessing at it.
+    """
+
+    return (
+        job["status"] == FAILED
+        and job["attempt_count"] < job["max_attempts"]
+    )
+
+
 def status_for_video(conn, video_id):
     """What the queue knows about one catalog video, or None."""
 
