@@ -193,3 +193,42 @@ def test_the_error_is_returned_not_raised(monkeypatch):
     result = handler.handler(job())
 
     assert result["error"].startswith("ZeroDivisionError")
+
+
+def test_a_missing_cached_model_stops_the_worker(monkeypatch, tmp_path):
+    """Requirement of the Cached Model setup: say what is wrong, then stop.
+
+    A worker whose endpoint has no Cached Model attached can never transcribe
+    anything. Coming up anyway would mean accepting lectures and failing every
+    one of them on a billing GPU, so this is the one load failure that is fatal.
+    """
+
+    from rag import transcribe_cohere
+
+    monkeypatch.setenv("RUNPOD_MODEL_CACHE", str(tmp_path / "empty-cache"))
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.delenv("COHERE_TRANSCRIBE_MODEL_PATH", raising=False)
+
+    with pytest.raises(transcribe_cohere.ModelNotCached) as caught:
+        handler.preload_model()
+
+    assert "Cached Model" in str(caught.value)
+
+
+def test_a_transient_load_failure_lets_the_worker_start(monkeypatch, tmp_path):
+    """An OOM may pass on the next start; crash-looping only bills for it."""
+
+    from rag import transcribe_cohere
+
+    snapshot = tmp_path / "snap"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setenv("COHERE_TRANSCRIBE_MODEL_PATH", str(snapshot))
+
+    def explode():
+        raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setattr(transcribe_cohere, "load_model", explode)
+
+    assert handler.preload_model() is False

@@ -18,6 +18,7 @@ pull several gigabytes off Hugging Face.
 """
 
 import argparse
+import os
 import time
 from functools import lru_cache
 from pathlib import Path
@@ -32,13 +33,146 @@ SAMPLE_RATE = 16000
 DEFAULT_CHUNKS_DIR = "data/audios/chunks"
 DEFAULT_OUTPUT = "data/transcripts/transcript.txt"
 
+# Where RunPod mounts a Cached Model. The endpoint is configured with the model
+# and RunPod's own Hugging Face token, and the weights arrive on the volume --
+# so this image ships no token, downloads nothing at build, and downloads
+# nothing at runtime. The layout is the standard Hugging Face cache:
+#
+#   /runpod-volume/huggingface-cache/hub/
+#       models--CohereLabs--cohere-transcribe-arabic-07-2026/
+#           refs/main                  -> a revision hash
+#           snapshots/<hash>/          -> config.json, weights, processor
+#
+RUNPOD_MODEL_CACHE = "/runpod-volume/huggingface-cache/hub"
+
+# A snapshot directory that exists but holds no config.json is not a model --
+# it is an interrupted or partial mount, and loading from it fails deep inside
+# transformers with something that does not mention the cache at all.
+SNAPSHOT_MARKER = "config.json"
+
+
+class ModelNotCached(RuntimeError):
+    """The worker is offline and the cached model is not on the volume.
+
+    Separate from every other load failure because it is the one that will
+    never fix itself by retrying: the endpoint's Cached Model configuration has
+    to change. Nothing about a restart makes the weights appear.
+    """
+
 
 def model_id():
     """Which checkpoint to load. Env first so the GPU image needs no rebuild."""
 
-    import os
-
     return os.getenv("COHERE_TRANSCRIBE_MODEL", "").strip() or MODEL_ID
+
+
+def cache_root():
+    """The hub cache to look in. Overridable so tests need no /runpod-volume."""
+
+    return Path(os.getenv("RUNPOD_MODEL_CACHE", "").strip() or RUNPOD_MODEL_CACHE)
+
+
+def repo_dir_name(checkpoint):
+    """`org/model` -> `models--org--model`, the hub cache's directory name."""
+
+    return "models--" + checkpoint.replace("/", "--")
+
+
+def _is_snapshot(path):
+    """A directory that actually holds a model, not an empty or partial one."""
+
+    return path.is_dir() and (path / SNAPSHOT_MARKER).exists()
+
+
+def cached_snapshot(checkpoint=None, root=None):
+    """The local snapshot directory for `checkpoint`, or None if not cached.
+
+    refs/main is preferred: it is the revision the hub resolved, and on a repo
+    with several snapshots on the volume it is the one that was asked for.
+    Anything else is a fallback -- a mount that never wrote refs/main, or one
+    whose refs/main names a snapshot that is not there -- and in that case the
+    most recently written usable snapshot is a better answer than failing,
+    because it is a model and the alternative is no transcription at all.
+    """
+
+    checkpoint = checkpoint or model_id()
+    root = Path(root) if root is not None else cache_root()
+
+    repo = root / repo_dir_name(checkpoint)
+    snapshots = repo / "snapshots"
+
+    if not snapshots.is_dir():
+        return None
+
+    ref = repo / "refs" / "main"
+
+    if ref.is_file():
+        try:
+            revision = ref.read_text(encoding="utf-8").strip()
+        except OSError:
+            revision = ""
+
+        if revision and _is_snapshot(snapshots / revision):
+            return snapshots / revision
+
+    usable = [path for path in snapshots.iterdir() if _is_snapshot(path)]
+
+    if not usable:
+        return None
+
+    return max(usable, key=lambda path: path.stat().st_mtime)
+
+
+def offline_only():
+    """Whether this process is forbidden from reaching Hugging Face.
+
+    Set in gpu/Dockerfile. It is what separates the RunPod worker, which must
+    never download weights mid-job, from a workstation run of this module,
+    which still pulls the model from the hub the way it always did.
+    """
+
+    return "1" in {
+        os.getenv("HF_HUB_OFFLINE", "").strip(),
+        os.getenv("TRANSFORMERS_OFFLINE", "").strip(),
+    }
+
+
+def resolve_checkpoint():
+    """What to hand `from_pretrained`: a local snapshot path, or the model id.
+
+    Returns a filesystem path whenever the model is on the volume, so nothing
+    is resolved against the hub. Offline with no cached model is an error here
+    rather than a download attempt that would fail later and less clearly.
+    """
+
+    explicit = os.getenv("COHERE_TRANSCRIBE_MODEL_PATH", "").strip()
+
+    if explicit:
+        if not _is_snapshot(Path(explicit)):
+            raise ModelNotCached(
+                f"COHERE_TRANSCRIBE_MODEL_PATH={explicit} is not a model snapshot "
+                f"(no {SNAPSHOT_MARKER} in it)."
+            )
+        return explicit
+
+    snapshot = cached_snapshot()
+
+    if snapshot is not None:
+        return str(snapshot)
+
+    if offline_only():
+        checkpoint = model_id()
+        raise ModelNotCached(
+            f"{checkpoint} is not in the RunPod model cache. Expected a snapshot "
+            f"under {cache_root() / repo_dir_name(checkpoint) / 'snapshots'}. "
+            "Configure this endpoint with the Cached Model (Settings -> Models) "
+            "and a Hugging Face token with access to the gated repository; the "
+            "worker runs offline and will not download it."
+        )
+
+    # Workstation path: no RunPod volume, no offline flag, so this is somebody
+    # running `python -m rag.transcribe_cohere` and the hub is fine.
+    return model_id()
 
 
 @lru_cache
@@ -49,6 +183,10 @@ def load_model():
     same container gets the model already in VRAM, and only a cold start pays
     the several-gigabyte load.
 
+    The checkpoint is resolved to a local snapshot first -- see
+    `resolve_checkpoint` -- so on RunPod this reads from the cached model on
+    the volume and never from the hub.
+
     bfloat16 on CUDA, matching the benchmarked configuration — ~3.85 GB idle
     and ~4.90 GB peak on a 20 GB card, against roughly double that in fp32 for
     no measured accuracy gain on this model. Left at the checkpoint's own dtype
@@ -58,11 +196,17 @@ def load_model():
     import torch
     from transformers import AutoProcessor, CohereAsrForConditionalGeneration
 
-    checkpoint = model_id()
+    checkpoint = resolve_checkpoint()
 
-    processor = AutoProcessor.from_pretrained(checkpoint)
+    # True whenever `checkpoint` is a directory on the volume, which is always
+    # the case on the RunPod worker. It makes a download impossible rather than
+    # merely unnecessary: without it, a cache that is missing one file falls
+    # back to fetching that file mid-job, from a worker holding no token.
+    local_only = Path(checkpoint).is_dir()
 
-    kwargs = {"device_map": "auto"}
+    processor = AutoProcessor.from_pretrained(checkpoint, local_files_only=local_only)
+
+    kwargs = {"device_map": "auto", "local_files_only": local_only}
 
     if torch.cuda.is_available():
         kwargs["dtype"] = torch.bfloat16

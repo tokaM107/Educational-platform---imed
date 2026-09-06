@@ -7,10 +7,16 @@ and stops when the queue empties, so nothing is billed between lectures.
 
     runpod.serverless.start({"handler": handler})
 
-The model is loaded at import, not inside the handler. RunPod keeps a worker
-warm for a while after a job, and a warm worker must not pay the several-GB
-load again — that cost belongs to the worker's start, where RunPod's own cold
-start already accounts for it.
+The model is loaded at the worker's start, not inside the handler. RunPod keeps
+a worker warm for a while after a job, and a warm worker must not pay the
+several-GB load again — that cost belongs to the worker's start, where RunPod's
+own cold start already accounts for it.
+
+The weights come from a RunPod Cached Model on /runpod-volume, not from this
+image and not from Hugging Face at runtime: the image carries code and
+dependencies only, holds no Hugging Face token, and runs with HF_HUB_OFFLINE=1
+so a missing file fails loudly instead of turning into a silent download from a
+worker that has no credentials to do it with.
 
 Media lifecycle, which is the part worth being strict about:
 
@@ -72,16 +78,28 @@ def preload_model():
     does: RunPod keeps the container alive between jobs, and the second lecture
     finds the model already resident.
 
-    Failure here is deliberately not fatal. A worker that cannot load the model
-    should still start and fail its jobs with a readable message, rather than
-    crash-loop while RunPod bills for the restarts.
+    A missing cached model is fatal, and nothing else is. That split is the
+    point: ModelNotCached means the endpoint is misconfigured -- the Cached
+    Model was never attached, or the token cannot reach the gated repo -- and
+    no number of restarts makes weights appear, so the worker says exactly what
+    is wrong and stops instead of accepting lectures it can only fail. Every
+    other failure (a transient OOM, a half-written mount) may well succeed on
+    the next start, so those still let the worker come up and fail its jobs
+    with a readable message rather than crash-loop while RunPod bills for it.
     """
 
+    from rag.transcribe_cohere import ModelNotCached, load_model, resolve_checkpoint
+
     try:
-        from rag.transcribe_cohere import load_model, model_id
+        checkpoint = resolve_checkpoint()
 
-        logger.info("Loading %s…", model_id())
+    except ModelNotCached as error:
+        logger.critical("Cached model unavailable: %s", error)
+        raise
 
+    logger.info("Loading %s…", checkpoint)
+
+    try:
         started = time.monotonic()
         load_model()
 

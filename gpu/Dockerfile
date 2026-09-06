@@ -17,13 +17,24 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     LOG_LEVEL=INFO
 
-# Where Hugging Face puts the weights. The default is ~/.cache/huggingface on
-# the container's root filesystem, which on a serverless worker is small and
-# not the volume — a multi-gigabyte checkpoint can fill it and fail the pull
-# with a confusing "no space left" part-way through the download. Baked into
-# the image below, so a cold start reads from the image layer instead of
-# fetching several gigabytes over the network on every scale-from-zero.
-ENV HF_HOME=/opt/hf
+# The weights are a RunPod Cached Model, mounted on the volume by the platform
+# and configured on the endpoint together with the Hugging Face token that can
+# read the gated repository. Nothing about them lives in this image: no
+# download at build, no download at run, and no token in any layer.
+#
+# HF_HOME points at the mount so anything in the Hugging Face stack that
+# consults the cache on its own finds it at $HF_HOME/hub, which is exactly
+# where RunPod puts it. The loader does not rely on that -- it resolves the
+# snapshot directory itself and passes a path -- but a library that looks
+# somewhere else would otherwise look in a directory that is empty.
+ENV HF_HOME=/runpod-volume/huggingface-cache
+
+# The worker never fetches weights. If a file is missing from the cache the
+# load must fail with a message naming the cache, rather than quietly turning
+# into a download from a container that holds no token and may have no route
+# out — mid-job, with a GPU already billing.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 
 # ffmpeg is what reads the Bunny rendition and cuts the audio. Without it every
 # job fails at AudioError("ffmpeg is not installed"), which is the single most
@@ -65,22 +76,14 @@ RUN python3 --version \
 COPY rag/__init__.py rag/audio.py rag/media_url.py rag/transcribe_cohere.py ./rag/
 COPY gpu/__init__.py gpu/handler.py ./gpu/
 
-# Bake the model into the image so scaling from zero does not re-download it.
-# This is the difference between a cold start of seconds and one of minutes,
-# and it is why the image is large — deliberately trading registry storage for
-# the latency a student would otherwise wait through.
+# Which repository to look for on the volume. It is not downloaded here; the
+# name is what turns into the cache directory the loader resolves:
+#
+#   $HF_HOME/hub/models--CohereLabs--cohere-transcribe-arabic-07-2026/
+#
+# so it has to match the model configured on the endpoint. ARG so a different
+# checkpoint needs an argument rather than an edit.
 ARG COHERE_TRANSCRIBE_MODEL=CohereLabs/cohere-transcribe-arabic-07-2026
 ENV COHERE_TRANSCRIBE_MODEL=${COHERE_TRANSCRIBE_MODEL}
-
-# HF_TOKEN is a build secret, not an image layer: passed with
-# `--secret id=hf_token`, it is readable during this step and absent from the
-# result. Baking it in with ENV or ARG would ship the token to anyone who pulls.
-RUN --mount=type=secret,id=hf_token,required=false \
-    HF_TOKEN="$(cat /run/secrets/hf_token 2>/dev/null || true)" \
-    python3 -c "\
-from huggingface_hub import snapshot_download; \
-import os; \
-snapshot_download(os.environ['COHERE_TRANSCRIBE_MODEL'], \
-                  token=os.environ.get('HF_TOKEN') or None)"
 
 CMD ["python3", "-u", "-m", "gpu.handler"]
