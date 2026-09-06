@@ -1,10 +1,25 @@
 """Request and response shapes for the video_id transcription trigger."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class TranscriptionRequest(BaseModel):
-    """What the backend sends when a video is ready to be transcribed."""
+    """What the backend sends when a video is ready to be transcribed.
+
+    The canonical field is `video_id`, but the course-item payload the frontend
+    already passes around carries the same number as `id`, either at the top
+    level or inside the `data` envelope:
+
+        {"video_id": 1842}
+        {"id": 1842, "type": "video", "videoStatus": "ready", ...}
+        {"success": true, "data": {"id": 1842, ...}}
+
+    All three are accepted, so the caller can forward the object it already has
+    instead of reshaping it. Everything else in that payload is ignored:
+    `videoStatus` and `videoAttached` describe the catalog's own view of the
+    upload, and this service checks Bunny itself rather than trusting a field
+    it did not write.
+    """
 
     video_id: int = Field(
         ...,
@@ -21,6 +36,25 @@ class TranscriptionRequest(BaseModel):
         description="re-transcribe a video that already completed or exhausted "
                     "its retries",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_course_item_shapes(cls, data):
+
+        if not isinstance(data, dict):
+            return data
+
+        # Unwrap the envelope first, keeping any `force` the caller put beside
+        # it rather than inside it.
+        inner = data.get("data")
+
+        if isinstance(inner, dict):
+            data = {**inner, "force": data.get("force", inner.get("force", False))}
+
+        if "video_id" not in data and "id" in data:
+            data = {**data, "video_id": data["id"]}
+
+        return data
 
 
 class TranscriptionResponse(BaseModel):

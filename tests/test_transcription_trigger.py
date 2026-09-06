@@ -15,33 +15,32 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api import deps, transcriptions
-from app.config import get_settings
 from app.services import transcription_jobs
 from tests.fake_db import FakeConn
 
 
-SECRET = "trigger-secret-long-enough-to-be-a-credential"
-
 GUID = "bunny-guid-17"
 
-
-@pytest.fixture(autouse=True)
-def configure(monkeypatch):
-    monkeypatch.setattr(get_settings(), "transcription_trigger_secret", SECRET)
+USER = {"id": 7, "name": "Toqa", "email": "t@example.com", "role": "student"}
 
 
-def make_client(conn):
+def make_client(conn, user=USER):
+    """The endpoint behind the same bearer dependency the chat endpoints use."""
+
     application = FastAPI()
     application.include_router(transcriptions.router)
     application.dependency_overrides[deps.get_conn] = lambda: conn
+
+    if user is not None:
+        application.dependency_overrides[deps.get_current_user] = lambda: user
+
     return TestClient(application)
 
 
-def post(conn, body=None, secret=SECRET):
-    return make_client(conn).post(
+def post(conn, body=None, user=USER):
+    return make_client(conn, user).post(
         "/api/transcriptions",
         json={"video_id": 17} if body is None else body,
-        headers={"X-Transcription-Secret": secret},
     )
 
 
@@ -99,26 +98,18 @@ def responder(video=None, job=None, inserted=True, jobs=None):
 # -------------------------
 
 
-def test_a_request_without_the_secret_is_refused():
+def test_an_unauthenticated_request_is_refused():
+    """The endpoint starts GPU work; it is not open to an anonymous caller."""
+
     conn = FakeConn(responder())
 
-    assert post(conn, secret="").status_code == 403
+    # No get_current_user override, so the real bearer dependency runs and
+    # finds no Authorization header.
+    response = make_client(conn, user=None).post(
+        "/api/transcriptions", json={"video_id": 17}
+    )
 
-
-def test_a_request_with_the_wrong_secret_is_refused():
-    conn = FakeConn(responder())
-
-    assert post(conn, secret="not-the-secret").status_code == 403
-
-
-def test_an_unconfigured_trigger_refuses_rather_than_admitting_everyone(
-    monkeypatch,
-):
-    """A forgotten environment variable must not open the endpoint."""
-
-    monkeypatch.setattr(get_settings(), "transcription_trigger_secret", "")
-
-    assert post(FakeConn(responder())).status_code == 503
+    assert response.status_code == 401
 
 
 # -------------------------
@@ -370,3 +361,63 @@ def test_without_force_a_completed_video_is_never_requeued():
     post(conn)
 
     assert not any("attempt_count = 0" in sql for sql, _ in conn.calls)
+
+
+# -------------------------
+# Accepted request shapes
+# -------------------------
+
+
+def test_the_course_item_object_is_accepted_as_it_comes():
+    """The frontend forwards the item it already holds, `id` and all."""
+
+    conn = FakeConn(responder(jobs=[[], job_row()]))
+
+    response = post(conn, body={
+        "id": 17,
+        "moduleId": 91,
+        "type": "video",
+        "title": "Lecture 3 — Cardiac cycle",
+        "videoAttached": True,
+        "videoStatus": "ready",
+    })
+
+    assert response.status_code == 202
+    assert response.json()["video_id"] == 17
+
+
+def test_the_success_envelope_is_unwrapped():
+    conn = FakeConn(responder(jobs=[[], job_row()]))
+
+    response = post(conn, body={
+        "success": True,
+        "code": None,
+        "message": "Video status loaded",
+        "data": {"id": 17, "type": "video", "videoStatus": "ready"},
+        "errors": None,
+    })
+
+    assert response.status_code == 202
+    assert response.json()["video_id"] == 17
+
+
+def test_force_survives_the_envelope():
+    """Sent beside `data`, where a caller forwarding a response would put it."""
+
+    conn = FakeConn(
+        responder(jobs=[job_row(status="completed"), job_row(status="pending")])
+    )
+
+    response = post(conn, body={"data": {"id": 17}, "force": True})
+
+    assert response.status_code == 202
+    assert any("attempt_count = 0" in sql for sql, _ in conn.calls)
+
+
+def test_video_id_still_wins_when_both_are_present():
+    conn = FakeConn(responder(jobs=[[], job_row()]))
+
+    response = post(conn, body={"video_id": 17, "id": 999})
+
+    assert response.status_code == 202
+    assert response.json()["video_id"] == 17

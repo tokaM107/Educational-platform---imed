@@ -13,19 +13,19 @@ waited for the GPU would hold an HTTP connection open across a cold start, a
 queue wait and an hour of audio, and would give its caller no way to tell a
 failed transcription from a successful one whose response was lost.
 
-Authentication is a shared secret in a header, not a user token. The caller is
-another service rather than a person, and the two roles this application has
-(student, doctor) are both wrong for it: this endpoint spends GPU money, so it
-must not be reachable by anyone holding an ordinary login.
+Authenticated with the application's own bearer token, the same dependency the
+chat endpoints use: the caller reaches this having already logged the user in,
+so there is no second credential to carry. What keeps the GPU bill bounded is
+therefore not the identity but the queue: a video already transcribed is never
+re-run, one already in flight returns its existing job, and re-transcribing on
+purpose needs an explicit `force`.
 """
 
-import hmac
 import logging
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 
-from app.api.deps import get_conn
-from app.config import get_settings
+from app.api.deps import get_conn, get_current_user
 from app.schemas.transcription import TranscriptionRequest, TranscriptionResponse
 from app.services import transcription_jobs
 
@@ -41,27 +41,6 @@ IN_PROGRESS = (
     transcription_jobs.SUBMITTED,
     transcription_jobs.PROCESSING,
 )
-
-
-def _authenticate(secret):
-    """Constant-time comparison against the configured trigger secret.
-
-    Unset means refuse, matching the Bunny webhook: accepting everything when
-    no secret is configured would turn a forgotten environment variable into an
-    endpoint anyone can spend GPU time through.
-    """
-
-    expected = get_settings().transcription_trigger_secret
-
-    if not expected:
-        logger.error(
-            "Transcription trigger called but TRANSCRIPTION_TRIGGER_SECRET "
-            "is not set"
-        )
-        raise HTTPException(status_code=503, detail="trigger not configured")
-
-    if not secret or not hmac.compare_digest(secret, expected):
-        raise HTTPException(status_code=403, detail="bad trigger secret")
 
 
 def _video(conn, video_id):
@@ -141,7 +120,7 @@ def start_transcription(
     body: TranscriptionRequest,
     response: Response,
     conn=Depends(get_conn),
-    x_transcription_secret: str = Header(default=""),
+    current_user=Depends(get_current_user),
 ):
     """Queue this video for transcription, or report the job already doing it.
 
@@ -149,8 +128,6 @@ def start_transcription(
     to do because the lecture is already transcribed — so a caller can tell
     "started" from "was already done" without parsing the status string.
     """
-
-    _authenticate(x_transcription_secret)
 
     video_id = body.video_id
     guid = _video(conn, video_id)
@@ -208,8 +185,8 @@ def start_transcription(
         raise HTTPException(status_code=500, detail="could not queue the job")
 
     logger.info(
-        "Queued transcription for video_id=%s guid=%s (job=%s)",
-        video_id, guid, job["id"],
+        "Queued transcription for video_id=%s guid=%s (job=%s, by user=%s)",
+        video_id, guid, job["id"], current_user["id"],
     )
 
     return _response(job, video_id, queued=queued)

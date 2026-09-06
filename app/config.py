@@ -206,15 +206,6 @@ class Settings:
         # every request rather than trusting the internet.
         self.bunny_webhook_secret = env("BUNNY_WEBHOOK_SECRET", "")
 
-        # The backend calls POST /api/transcriptions with a video_id to start a
-        # transcription, independently of any Bunny callback. It is a service
-        # calling a service, so there is no user token to authenticate — and
-        # neither application role is right for it, since the endpoint spends
-        # GPU money and both students and doctors hold ordinary logins. A
-        # shared secret in a header is the credential. Unset means refuse, for
-        # the same reason as the webhook secret above.
-        self.transcription_trigger_secret = env("TRANSCRIPTION_TRIGGER_SECRET", "")
-
         # --- Transcription ---
         #
         # Which ASR the worker uses.
