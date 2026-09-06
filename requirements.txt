@@ -35,9 +35,18 @@ llvmlite==0.49.0
 markdown-it-py==4.2.0
 MarkupSafe==3.0.3
 mdurl==0.1.2
-mlx==0.32.0
-mlx-metal==0.32.0
-mlx-whisper==0.4.3
+# Apple Silicon only. mlx-metal ships no Linux wheel at all, so an
+# unconditional pin here fails the whole install on any Linux host -- which is
+# what broke the Coolify deployment of the transcription worker.
+#
+# Nothing in this repository imports mlx: it is left over from a local
+# Whisper experiment, and rag/transcribe_whisper.py (itself superseded, and
+# excluded from both images) uses huggingface_hub rather than MLX. The markers
+# keep it installable on a Mac for that kind of local work without it ever
+# being a production dependency.
+mlx==0.32.0; sys_platform == "darwin"
+mlx-metal==0.32.0; sys_platform == "darwin"
+mlx-whisper==0.4.3; sys_platform == "darwin"
 more-itertools==11.1.0
 mpmath==1.3.0
 msgpack==1.2.1
@@ -95,4 +104,8 @@ typing-inspection==0.4.3
 typing_extensions==4.16.0
 urllib3==2.7.0
 uvicorn==0.52.1
-websockets==16.1.1
+# Held below 16: supabase pulls in realtime, which requires
+# websockets>=11,<16. The 16.1.1 pin here was unsatisfiable on every platform
+# -- pip answers ResolutionImpossible -- and did not match the version the
+# working environment actually had installed.
+websockets==15.0.1
