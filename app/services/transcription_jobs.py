@@ -43,6 +43,17 @@ FAILED = "failed"
 # The two states where RunPod holds the job and this side is only waiting.
 IN_FLIGHT = (SUBMITTED, PROCESSING)
 
+# The same two, as the list form the queries below bind.
+#
+# `status = ANY(%(in_flight)s)` and not `status IN %(in_flight)s`. psycopg3
+# sends parameters to Postgres to be bound server-side, so a tuple parameter in
+# an IN becomes a single placeholder — `WHERE status IN $3` — which Postgres
+# rejects as a syntax error before any row is read. psycopg2 rewrote the tuple
+# into `IN ('submitted', 'processing')` client-side, which is why this shape
+# survives in older code. ANY() takes one array parameter and is the form that
+# works under both, and it is what the rest of this codebase already uses.
+IN_FLIGHT_LIST = list(IN_FLIGHT)
+
 
 # A job is claimable when nobody is working on it: never submitted, or failed
 # with attempts left. `max_attempts` is read from the row, not from
@@ -101,7 +112,7 @@ RECOVER_STALE_SQL = """
         last_error = 'abandoned: no worker reported on this job for '
                      || %(stale_minutes)s || ' minutes',
         updated_at = now()
-    WHERE status IN %(in_flight)s
+    WHERE status = ANY(%(in_flight)s)
       AND updated_at < now() - make_interval(mins => %(stale_minutes)s)
     RETURNING id, bunny_guid, runpod_job_id, attempt_count, max_attempts
 """
@@ -113,7 +124,7 @@ IN_FLIGHT_SQL = """
     SELECT id, bunny_guid, video_id, attempt_count, max_attempts, runpod_job_id,
            EXTRACT(EPOCH FROM (now() - submitted_at))
     FROM transcription_jobs
-    WHERE status IN %(in_flight)s AND runpod_job_id IS NOT NULL
+    WHERE status = ANY(%(in_flight)s) AND runpod_job_id IS NOT NULL
     ORDER BY submitted_at
     LIMIT %(limit)s
 """
@@ -230,7 +241,7 @@ def recover_stale(conn):
             RECOVER_STALE_SQL,
             {
                 "failed": FAILED,
-                "in_flight": IN_FLIGHT,
+                "in_flight": IN_FLIGHT_LIST,
                 "stale_minutes": settings.transcription_stale_minutes,
             },
         )
@@ -374,7 +385,7 @@ def in_flight(conn, limit=50):
 
     with conn.cursor() as cur:
 
-        cur.execute(IN_FLIGHT_SQL, {"in_flight": IN_FLIGHT, "limit": limit})
+        cur.execute(IN_FLIGHT_SQL, {"in_flight": IN_FLIGHT_LIST, "limit": limit})
         rows = cur.fetchall()
 
     jobs = []

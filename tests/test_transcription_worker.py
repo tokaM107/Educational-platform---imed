@@ -399,7 +399,9 @@ def test_the_claim_predicate_does_not_also_do_stale_recovery():
 def test_stale_recovery_only_touches_jobs_nobody_is_watching():
     sql = " ".join(transcription_jobs.RECOVER_STALE_SQL.split())
 
-    assert "status IN %(in_flight)s" in sql
+    # ANY() and not IN: psycopg3 binds server-side, so a list in an IN is one
+    # placeholder PostgreSQL has no grammar for. See tests/test_sql_placeholders.py.
+    assert "status = ANY(%(in_flight)s)" in sql
     assert "updated_at < now() - make_interval" in sql
 
 

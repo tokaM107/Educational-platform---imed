@@ -49,6 +49,7 @@ onnxruntime==1.28.0
 packaging==26.3
 pgvector==0.5.0
 platformdirs==4.11.2
+pglast==8.4
 pluggy==1.6.0
 pooch==1.9.0
 protobuf==7.35.1
