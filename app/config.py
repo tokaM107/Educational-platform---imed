@@ -17,6 +17,25 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 
+def _clean_key(value):
+    """A signing key as pasted, minus what a paste adds.
+
+    Quotes are the one that bites. A dashboard value copied with its
+    surrounding quotes — or a Coolify field entered as "abc123" — is a
+    perfectly valid string that hashes to something Bunny will never agree
+    with, and the only symptom is a 403 identical to sending no token at all.
+    Nothing in a Bunny key is ever a quote, so removing them is safe and the
+    alternative is a silent, unattributable failure.
+    """
+
+    value = (value or "").strip()
+
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1].strip()
+
+    return value
+
+
 def env(name, default):
     """os.getenv, except that a variable set to nothing counts as unset.
 
@@ -212,7 +231,7 @@ class Settings:
         #
         # BUNNY_STREAM_TOKEN_AUTH_KEY is accepted as an older name for the same
         # thing, so a deployment that already sets it keeps working.
-        self.bunny_token_auth_key = (
+        self.bunny_token_auth_key = _clean_key(
             env("BUNNY_STREAM_PULL_ZONE_TOKEN_KEY", "")
             or env("BUNNY_STREAM_TOKEN_AUTH_KEY", "")
         )
@@ -225,7 +244,7 @@ class Settings:
         # an unsigned one — an identical 403, with nothing to say which of the
         # two credentials was the wrong one. `bunny_key_warning` below turns
         # that silence into a sentence.
-        self.bunny_embed_token_key = env("BUNNY_STREAM_TOKEN_KEY", "")
+        self.bunny_embed_token_key = _clean_key(env("BUNNY_STREAM_TOKEN_KEY", ""))
 
         self.bunny_token_auth_algorithm = env(
             "BUNNY_TOKEN_AUTH_ALGORITHM", "advanced"
@@ -403,6 +422,14 @@ class Settings:
                 "BUNNY_STREAM_PULL_ZONE_TOKEN_KEY is not set, so media URLs "
                 "are sent unsigned. That is correct only if the pull zone has "
                 "token authentication switched off."
+            )
+
+        if any(c.isspace() for c in self.bunny_token_auth_key):
+            return (
+                "BUNNY_STREAM_PULL_ZONE_TOKEN_KEY contains whitespace inside "
+                "the value. Bunny keys do not, so this is almost certainly a "
+                "paste artefact, and it hashes to something the CDN will "
+                "never accept."
             )
 
         if (

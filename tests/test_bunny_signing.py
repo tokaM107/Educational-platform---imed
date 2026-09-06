@@ -809,3 +809,41 @@ def test_no_key_is_ever_printed_in_a_warning(monkeypatch):
     )
 
     assert EMBED_KEY not in settings.bunny_key_warning()
+
+
+# -------------------------
+# Paste artefacts
+# -------------------------
+
+
+@pytest.mark.parametrize("pasted", [
+    '"the-key"',
+    "'the-key'",
+    "  the-key  ",
+    '  "the-key"  ',
+])
+def test_quotes_and_padding_around_a_pasted_key_are_removed(monkeypatch, pasted):
+    """A quoted key is a valid string that hashes to the wrong thing."""
+
+    settings = settings_with(
+        monkeypatch, BUNNY_STREAM_PULL_ZONE_TOKEN_KEY=pasted
+    )
+
+    assert settings.bunny_token_auth_key == "the-key"
+
+
+def test_whitespace_inside_a_key_is_reported_rather_than_trimmed(monkeypatch):
+    """Trimming it would invent a key nobody configured."""
+
+    settings = settings_with(
+        monkeypatch, BUNNY_STREAM_PULL_ZONE_TOKEN_KEY="the key"
+    )
+
+    assert settings.bunny_token_auth_key == "the key"
+    assert "whitespace" in settings.bunny_key_warning()
+
+
+def test_a_key_that_is_only_quotes_counts_as_unset(monkeypatch):
+    settings = settings_with(monkeypatch, BUNNY_STREAM_PULL_ZONE_TOKEN_KEY='""')
+
+    assert settings.bunny_token_auth_key == ""
