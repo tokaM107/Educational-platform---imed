@@ -72,13 +72,31 @@ def no_network(monkeypatch):
 def record_marks(monkeypatch):
     """Capture the status transitions the worker asks for."""
 
-    marks = []
+    class Marks(list):
+        """(name, args) per call, with the keywords alongside.
+
+        The keywords go beside the list rather than into its tuples so that
+        `mark_failed(..., permanent=True)` can be asserted on without changing
+        the shape every other test here unpacks.
+        """
+
+        def __init__(self):
+            super().__init__()
+            self.kwargs = []
+
+        def record(self, name, args, kwargs):
+            self.append((name, args))
+            self.kwargs.append(kwargs)
+
+    marks = Marks()
 
     for name in ("mark_submitted", "mark_failed", "mark_completed",
                  "mark_processing", "touch"):
         monkeypatch.setattr(
             transcription_jobs, name,
-            lambda conn, *args, _name=name: marks.append((_name, args)),
+            lambda conn, *args, _name=name, **kwargs: marks.record(
+                _name, args, kwargs
+            ),
         )
 
     return marks

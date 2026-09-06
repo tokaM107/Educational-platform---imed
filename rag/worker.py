@@ -59,6 +59,46 @@ class JobError(Exception):
     """This job cannot proceed. The message is recorded against the row."""
 
 
+class PermanentJobError(JobError):
+    """This job cannot proceed, and another attempt will not change that.
+
+    A media URL the CDN refuses, a catalog row that is not there. Retrying
+    those is three cold starts of a metered GPU to collect the same error three
+    times, and the two retries bury the first message under copies of itself.
+    The row is failed with its attempts spent, so it stops rather than coming
+    back round.
+    """
+
+
+# The same refusal seen from the other end. The GPU worker fetches with ffmpeg,
+# so what comes back is ffmpeg's rendering of the CDN's answer rather than a
+# status code. Matched narrowly: a transcript that merely mentions "403" must
+# not be read as a media failure, which is why these are the phrases ffmpeg and
+# requests produce and not the bare number.
+MEDIA_REFUSED_MARKERS = (
+    "http error 403",
+    "http error 401",
+    "http error 404",
+    "403 forbidden",
+    "401 unauthorized",
+    "server returned 403",
+    "server returned 401",
+    "server returned 404",
+)
+
+
+def is_media_refusal(text):
+    """Whether a failure message is the CDN refusing the URL rather than a fault.
+
+    Used to stop a deterministic media error from spending the retries, whether
+    it was found here before submitting or reported back by the GPU afterwards.
+    """
+
+    lowered = str(text or "").lower()
+
+    return any(marker in lowered for marker in MEDIA_REFUSED_MARKERS)
+
+
 # -------------------------
 # Working out what to send
 # -------------------------
@@ -108,11 +148,6 @@ def media_url_for(guid):
         raise JobError(f"refusing to transcribe {guid}: {error}") from error
 
     return source_url, video.get("length") or 0
-
-
-# -------------------------
-# Pass one: submit
-# -------------------------
 
 
 def transcribe_locally(source_url, chunk_seconds=None):
@@ -263,11 +298,16 @@ def submit_next(conn):
         runpod_job_id = transcribe_runpod.submit(source_url, video_id=video_id)
 
     except Exception as error:
+        permanent = isinstance(error, PermanentJobError)
+
         logger.warning(
-            "job=%s guid=%s attempt=%s/%s submit failed: %s",
-            job["id"], guid, job["attempt_count"], job["max_attempts"], error,
+            "job=%s guid=%s attempt=%s/%s submit failed%s: %s",
+            job["id"], guid, job["attempt_count"], job["max_attempts"],
+            " permanently" if permanent else "", error,
         )
-        transcription_jobs.mark_failed(conn, job["id"], error)
+        transcription_jobs.mark_failed(
+            conn, job["id"], error, permanent=permanent
+        )
         return True
 
     transcription_jobs.mark_submitted(conn, job["id"], runpod_job_id)
@@ -339,13 +379,20 @@ def settle_one(conn, job):
         return "pending"
 
     if state in transcribe_runpod.FAILED_STATES:
+        # A GPU that could not read the media failed for a reason another GPU
+        # will reproduce exactly. Retrying it is two more cold starts to be
+        # told the same thing.
+        permanent = is_media_refusal(result.get("error"))
+
         logger.warning(
-            "job=%s runpod_job=%s attempt=%s/%s RunPod %s: %s",
+            "job=%s runpod_job=%s attempt=%s/%s RunPod %s%s: %s",
             job["id"], runpod_job_id, job["attempt_count"], job["max_attempts"],
-            state, result.get("error"),
+            state, " (media refused, not retrying)" if permanent else "",
+            result.get("error"),
         )
         transcription_jobs.mark_failed(
-            conn, job["id"], f"RunPod {state}: {result.get('error')}"
+            conn, job["id"], f"RunPod {state}: {result.get('error')}",
+            permanent=permanent,
         )
         return "failed"
 

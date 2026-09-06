@@ -204,6 +204,18 @@ class Settings:
         # than one. Read on both sides so the two allowlists stay identical.
         self.bunny_media_hosts_extra = env("BUNNY_MEDIA_HOSTS", "")
 
+        # The pull zone's token authentication key, from the Bunny dashboard
+        # (Stream library -> Security). Not the Stream API key: that one is
+        # account-wide and must never be used to sign a URL a third party will
+        # hold. Unset means URLs are left unsigned, which is correct for a zone
+        # with token authentication switched off.
+        self.bunny_token_auth_key = env("BUNNY_STREAM_TOKEN_AUTH_KEY", "")
+
+        # Which of Bunny's two documented token forms the zone expects.
+        self.bunny_token_auth_algorithm = env(
+            "BUNNY_TOKEN_AUTH_ALGORITHM", "sha256"
+        ).strip().lower()
+
         # Bunny Stream webhooks carry no signature, so the only thing that
         # distinguishes a real callback from anybody who guessed the path is a
         # secret we put in the URL ourselves. Unset means the endpoint refuses
@@ -247,6 +259,26 @@ class Settings:
         # polling are both quick calls — this is not the transcription budget.
         self.runpod_request_timeout_seconds = int(
             env("RUNPOD_REQUEST_TIMEOUT_SECONDS", "60")
+        )
+
+        # How long a signed Bunny media URL stays valid.
+        #
+        # It has to outlive the whole job, not just the first byte. ffmpeg is
+        # run with -reconnect, so a dropped CDN connection is re-opened with
+        # the same URL part-way through a lecture, and an expired token would
+        # turn a recoverable blip into a failed transcription. The clock also
+        # starts before RunPod has a GPU: the job waits in the queue, then pays
+        # a cold start, and only then begins to read.
+        #
+        # So the default is the job's own timeout plus an hour for queue and
+        # cold start. Bounded rather than generous-by-default: this URL is a
+        # bearer credential for one video, and anyone holding it can read that
+        # lecture until it expires.
+        self.bunny_media_url_ttl_seconds = int(
+            env(
+                "BUNNY_MEDIA_URL_TTL_SECONDS",
+                str(self.runpod_job_timeout_seconds + 3600),
+            )
         )
 
         # The model the GPU worker loads. Here as well as on the worker so the

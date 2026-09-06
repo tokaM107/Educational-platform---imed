@@ -17,7 +17,10 @@ immediately, fetching 1080p instead of 240p is several hundred megabytes spent
 on pixels that go straight to /dev/null.
 """
 
+import base64
+import hashlib
 import time
+from urllib.parse import urlencode, urlparse, urlunparse
 
 import requests
 
@@ -283,12 +286,114 @@ def resolutions(video):
     return sorted(heights)
 
 
+# -------------------------
+# Token authentication
+# -------------------------
+#
+# The Stream pull zone has token authentication switched on, so an unsigned URL
+# is refused before Bunny looks at what was asked for -- a request for a guid
+# that does not exist answers 403 exactly like a real one. That is the whole of
+# why the GPU worker could not read video 28.
+#
+# Signing happens here, once, so everything that hands a Bunny URL to anything
+# gets a signed one: the transcription pipeline, and the playback redirect in
+# app/api/videos.py, which would otherwise be refused the same way.
+#
+# The security key never leaves this process. What travels is the token, which
+# is a hash -- RunPod is given a URL that expires and nothing else.
+
+TOKEN_ALGORITHMS = ("sha256", "md5")
+
+
+def _token(key, path, expires, algorithm):
+    """Bunny's token for one path and expiry.
+
+    Both of Bunny's documented forms are here because a pull zone can be
+    configured for either, and guessing wrong fails closed with another 403
+    that looks exactly like the one this exists to fix:
+
+        sha256   Base64(SHA256(key + path + expires))   current default
+        md5      Base64(MD5(key + path + expires))      legacy zones
+
+    The base64 is then made URL-safe the way Bunny specifies: `+` to `-`,
+    `/` to `_`, and `=` stripped.
+    """
+
+    if algorithm not in TOKEN_ALGORITHMS:
+        raise BunnyError(
+            f"unknown Bunny token algorithm {algorithm!r} "
+            f"(expected one of {', '.join(TOKEN_ALGORITHMS)})"
+        )
+
+    digest = hashlib.new(algorithm, f"{key}{path}{expires}".encode()).digest()
+
+    return (
+        base64.b64encode(digest)
+        .decode()
+        .replace("+", "-")
+        .replace("/", "_")
+        .replace("=", "")
+    )
+
+
+def sign_url(url, ttl_seconds=None, key=None, algorithm=None, now=None):
+    """Add Bunny's `token` and `expires` to a media URL. Returns it unchanged
+    if no security key is configured.
+
+    Unconfigured means unsigned rather than an error: a deployment whose pull
+    zone does not use token authentication is a working deployment, and this
+    must not start refusing to build URLs for it.
+
+    Only the path is signed, so the token is worthless for any other video --
+    it cannot be lifted from one lecture's URL and replayed against another.
+    """
+
+    settings = get_settings()
+
+    key = settings.bunny_token_auth_key if key is None else key
+
+    if not key:
+        return url
+
+    ttl = ttl_seconds or settings.bunny_media_url_ttl_seconds
+    algorithm = algorithm or settings.bunny_token_auth_algorithm
+
+    parsed = urlparse(url)
+
+    expires = int((time.time() if now is None else now)) + int(ttl)
+
+    token = _token(key, parsed.path, expires, algorithm)
+
+    # Appended rather than merged: these URLs are built by this module and
+    # carry no query string of their own, and Bunny's basic scheme signs the
+    # path only, so a pre-existing query would not be covered by the token.
+    query = urlencode({"token": token, "expires": expires})
+
+    return urlunparse(parsed._replace(query=query))
+
+
+def redact(url):
+    """A media URL safe to log: the token and expiry removed.
+
+    The token is not the security key and cannot be reversed into it, but it is
+    a bearer credential for one video for as long as it lives, and job logs are
+    read by more people and kept for longer than that.
+    """
+
+    if not url or not isinstance(url, str):
+        return url
+
+    parsed = urlparse(url)
+
+    return urlunparse(parsed._replace(query="")) + ("?…" if parsed.query else "")
+
+
 def playlist_url(video):
     """The HLS master playlist. Always available; slower to read than an MP4."""
 
     _, _, hostname = _config()
 
-    return f"https://{hostname}/{_require_guid(video)}/playlist.m3u8"
+    return sign_url(f"https://{hostname}/{_require_guid(video)}/playlist.m3u8")
 
 
 def _require_guid(video):
@@ -343,7 +448,7 @@ def rendition_url(video, prefer="lowest"):
     height = pick_height(video, prefer)
 
     if video.get("hasMP4Fallback") and height:
-        return f"https://{hostname}/{guid}/play_{height}p.mp4"
+        return sign_url(f"https://{hostname}/{guid}/play_{height}p.mp4")
 
     return playlist_url(video)
 

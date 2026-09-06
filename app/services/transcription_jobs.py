@@ -351,7 +351,23 @@ def mark_completed(conn, job_id, chunk_count, metrics=None):
     conn.commit()
 
 
-def mark_failed(conn, job_id, error):
+# Failure, with the retry decision expressed in the statement rather than by
+# building SQL around a flag: `permanent` is a bound parameter, so there is one
+# query here whatever the caller decided.
+FAIL_SQL = """
+    UPDATE transcription_jobs
+    SET status = %(failed)s,
+        attempt_count = CASE WHEN %(permanent)s
+                             THEN max_attempts
+                             ELSE attempt_count END,
+        last_error = %(error)s,
+        completed_at = now(),
+        updated_at = now()
+    WHERE id = %(job_id)s
+"""
+
+
+def mark_failed(conn, job_id, error, permanent=False):
     """Record why. Whether this is terminal is decided by attempt_count.
 
     The row goes to 'failed' either way; the claim query is what distinguishes
@@ -359,23 +375,26 @@ def mark_failed(conn, job_id, error):
     (terminal). Keeping that decision in one place means the two cannot
     disagree about when to stop.
 
+    `permanent` is for a failure another attempt cannot fix — a media URL the
+    CDN refuses, a video that is not in the catalog. Retrying those is not
+    caution, it is three cold starts of a metered GPU to receive the same 403
+    three times, and it buries the real error under two more of itself. It
+    spends the remaining attempts rather than introducing a state: terminal
+    already means `attempt_count = max_attempts` everywhere else in this
+    module, and reusing it keeps one definition of "stop".
+
     The message is truncated rather than stored whole: a provider error can
     arrive with a response body attached, and the useful part is at the front.
     """
 
     with conn.cursor() as cur:
 
-        cur.execute(
-            """
-            UPDATE transcription_jobs
-            SET status = %s,
-                last_error = %s,
-                completed_at = now(),
-                updated_at = now()
-            WHERE id = %s
-            """,
-            (FAILED, str(error)[:2000], job_id),
-        )
+        cur.execute(FAIL_SQL, {
+            "failed": FAILED,
+            "permanent": bool(permanent),
+            "error": str(error)[:2000],
+            "job_id": job_id,
+        })
 
     conn.commit()
 
