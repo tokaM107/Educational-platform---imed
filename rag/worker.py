@@ -3,6 +3,7 @@
     python -m rag.worker                  # keep running: submit and poll
     python -m rag.worker --once           # one pass over both, then exit
     python -m rag.worker --video-id 11    # re-run one video deliberately
+    python -m rag.worker --cancel-job 3   # stop one job, and its RunPod job
     python -m rag.worker --status         # what the queue is doing
 
 This is the half of the pipeline the API cannot do. app/api/webhooks.py writes a
@@ -540,6 +541,56 @@ def run_one_video(video_id):
     )
 
 
+def cancel_job(job_id):
+    """Stop one job by id, and the RunPod job behind it if there is one.
+
+    The database is settled first and RunPod second. That order is deliberate:
+    the row is what every other process reads, so it must be terminal before
+    anything else is attempted, and `transcribe_runpod.cancel` is best-effort
+    by design — a job that already finished on RunPod's side cannot be
+    cancelled, and failing to cancel must not leave our row half-changed. The
+    same order stale recovery uses.
+    """
+
+    with connection() as conn:
+        result = transcription_jobs.cancel(conn, job_id)
+
+    outcome = result["outcome"]
+
+    if outcome == "not_found":
+        raise SystemExit(f"no transcription job with id {job_id}")
+
+    if outcome == "already_completed":
+        job = result["job"]
+        raise SystemExit(
+            f"job {job_id} already completed "
+            f"(guid={job['bunny_guid']} video_id={job['video_id']}) — "
+            "refusing to cancel a finished transcription"
+        )
+
+    job = result["job"]
+
+    print(
+        f"job {job_id} cancelled: status={job['status']} "
+        f"attempt={job['attempt_count']}/{job['max_attempts']} "
+        f"guid={job['bunny_guid']} video_id={job['video_id']}"
+    )
+
+    if result["was_active"]:
+        stopped = transcribe_runpod.cancel(result["runpod_job_id"])
+        print(
+            f"  RunPod job {result['runpod_job_id']}: "
+            f"{'cancelled' if stopped else 'could not be cancelled (see log)'}"
+        )
+    elif result["runpod_job_id"]:
+        print(
+            f"  RunPod job {result['runpod_job_id']} was already finished; "
+            "nothing to stop"
+        )
+    else:
+        print("  never reached RunPod; nothing to stop")
+
+
 def print_status():
     """What the queue is doing, for an operator with a stuck video."""
 
@@ -593,6 +644,11 @@ def parse_args(argv=None):
         "--status", action="store_true", help="print the queue and exit"
     )
     parser.add_argument(
+        "--cancel-job", type=int, metavar="JOB_ID",
+        help="stop one job by id: mark it terminally failed and cancel its "
+             "RunPod job if one is running. Completed jobs are refused.",
+    )
+    parser.add_argument(
         "--idle-seconds", type=int, default=IDLE_SECONDS,
         help="how long to sleep when there is nothing to do",
     )
@@ -614,6 +670,9 @@ def main(argv=None):
     try:
         if args.status:
             print_status()
+
+        elif args.cancel_job:
+            cancel_job(args.cancel_job)
 
         elif args.video_id:
             run_one_video(args.video_id)

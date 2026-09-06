@@ -43,12 +43,18 @@ class FakeConn:
         self.answer = answer or (lambda sql, params: [])
         self.calls = []
         self.committed = 0
+        self.rolled_back = 0
 
     def cursor(self):
         return FakeCursor(self)
 
     def commit(self):
         self.committed += 1
+
+    def rollback(self):
+        """Counted, so a test can assert a path left nothing written."""
+
+        self.rolled_back += 1
 
     def params_for(self, fragment):
         """Parameters of the first query containing `fragment`."""

@@ -380,6 +380,145 @@ def mark_failed(conn, job_id, error):
     conn.commit()
 
 
+# Cancelling is a terminal `failed`, not a status of its own.
+#
+# The table's CHECK constraint admits exactly pending, submitted, processing,
+# completed and failed, and it lives in the database repository -- a new
+# 'cancelled' value would be a schema change to a table this service does not
+# own, for a distinction the queue already expresses. Terminal here means what
+# it means everywhere else in this module: `failed` with no attempts left, the
+# same state a job reaches when it exhausts its retries. The claim query's
+# `attempt_count < max_attempts` is what keeps it terminal, so a cancelled job
+# is never picked back up, and `last_error` says who stopped it and why.
+#
+# runpod_job_id is deliberately kept rather than cleared. Nothing polls it once
+# the status leaves ('submitted', 'processing') -- `in_flight` filters on
+# exactly those -- so it is inert, and it is the only record of which RunPod
+# job this was, which is what an operator needs when reconciling GPU spend.
+CANCEL_SQL = """
+    UPDATE transcription_jobs
+    SET status = %(failed)s,
+        attempt_count = max_attempts,
+        last_error = %(note)s,
+        completed_at = now(),
+        updated_at = now()
+    WHERE id = %(job_id)s AND status <> %(completed)s
+    RETURNING id, bunny_guid, video_id, status, attempt_count, max_attempts,
+              runpod_job_id, last_error
+"""
+
+
+CANCEL_NOTE = "cancelled by operator"
+
+
+def cancel(conn, job_id, reason=None):
+    """Stop one job by id, without deleting anything. Returns what happened.
+
+        {"outcome": "cancelled" | "already_completed" | "not_found",
+         "job": {...} or None,
+         "runpod_job_id": the id RunPod knew it by, or None,
+         "was_active": whether RunPod may still be working on it}
+
+    `was_active` is what tells the caller to spend a RunPod API call: only a
+    job that was submitted or processing and carries a RunPod id can still be
+    burning GPU seconds. A pending job never reached RunPod, and a failed one
+    is already finished there.
+
+    A completed job is refused rather than cancelled. Its transcript is stored
+    and its chunks are answering questions; there is nothing left to stop, and
+    moving it out of `completed` would only make the queue lie about a video
+    that is fine.
+
+    The row is read FOR UPDATE and updated in the same transaction, so a job
+    the worker claims at that moment waits rather than racing -- without it,
+    cancel could read `pending`, the worker could claim and submit, and cancel
+    would then overwrite a row that had just been handed to a GPU it does not
+    know to stop.
+    """
+
+    with conn.cursor() as cur:
+
+        cur.execute(
+            """
+            SELECT id, bunny_guid, video_id, status, attempt_count, max_attempts,
+                   runpod_job_id, last_error
+            FROM transcription_jobs
+            WHERE id = %s
+            FOR UPDATE
+            """,
+            (job_id,),
+        )
+        row = cur.fetchone()
+
+        if row is None:
+            conn.rollback()
+            return {
+                "outcome": "not_found",
+                "job": None,
+                "runpod_job_id": None,
+                "was_active": False,
+            }
+
+        before = {
+            "id": row[0],
+            "bunny_guid": row[1],
+            "video_id": row[2],
+            "status": row[3],
+            "attempt_count": row[4],
+            "max_attempts": row[5],
+            "runpod_job_id": row[6],
+            "last_error": row[7],
+        }
+
+        if before["status"] == COMPLETED:
+            conn.rollback()
+            return {
+                "outcome": "already_completed",
+                "job": before,
+                "runpod_job_id": before["runpod_job_id"],
+                "was_active": False,
+            }
+
+        # The previous error is kept alongside the cancellation rather than
+        # replaced by it: why a job was failing is usually why somebody is
+        # cancelling it, and it is the only copy.
+        note = reason or CANCEL_NOTE
+
+        if before["last_error"]:
+            note = f"{note} (was: {before['last_error']})"
+
+        cur.execute(
+            CANCEL_SQL,
+            {
+                "failed": FAILED,
+                "completed": COMPLETED,
+                "note": note[:2000],
+                "job_id": job_id,
+            },
+        )
+        updated = cur.fetchone()
+
+    conn.commit()
+
+    return {
+        "outcome": "cancelled",
+        "job": {
+            "id": updated[0],
+            "bunny_guid": updated[1],
+            "video_id": updated[2],
+            "status": updated[3],
+            "attempt_count": updated[4],
+            "max_attempts": updated[5],
+            "runpod_job_id": updated[6],
+            "last_error": updated[7],
+        },
+        "runpod_job_id": before["runpod_job_id"],
+        "was_active": (
+            before["status"] in IN_FLIGHT and before["runpod_job_id"] is not None
+        ),
+    }
+
+
 def in_flight(conn, limit=50):
     """Jobs RunPod is holding, with how long ago each was submitted."""
 

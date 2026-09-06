@@ -23,7 +23,6 @@ first, and each skips rather than fails when its tooling is absent:
 """
 
 import ast
-import os
 import re
 from pathlib import Path
 
@@ -33,8 +32,6 @@ from app.services import transcription_jobs
 
 
 ROOT = Path(__file__).resolve().parent.parent
-
-DDL = ROOT / "db" / "proposals" / "20260905_transcription_jobs.sql"
 
 
 # The queries whose parameters are collections, which is where this goes wrong.
@@ -53,40 +50,18 @@ PARAMETERISED = {
         "in_flight": transcription_jobs.IN_FLIGHT_LIST,
         "limit": 50,
     },
+    "CANCEL_SQL": {
+        "failed": transcription_jobs.FAILED,
+        "completed": transcription_jobs.COMPLETED,
+        "note": transcription_jobs.CANCEL_NOTE,
+        "job_id": 1,
+    },
 }
 
 
 # -------------------------
 # Layer 1: a real database
 # -------------------------
-
-
-@pytest.fixture(scope="module")
-def db():
-    """A connection to a throwaway PostgreSQL, or skip.
-
-    Set TEST_DATABASE_URL to run these. They create the transcription_jobs
-    table from the migration itself, so what is exercised is the production
-    schema rather than an approximation of it.
-    """
-
-    url = os.getenv("TEST_DATABASE_URL")
-
-    if not url:
-        pytest.skip("TEST_DATABASE_URL is not set")
-
-    psycopg = pytest.importorskip("psycopg")
-
-    with psycopg.connect(url, autocommit=True) as conn:
-
-        with conn.cursor() as cur:
-            cur.execute("DROP TABLE IF EXISTS transcription_jobs CASCADE")
-            cur.execute(DDL.read_text(encoding="utf-8"))
-
-        yield conn
-
-        with conn.cursor() as cur:
-            cur.execute("DROP TABLE IF EXISTS transcription_jobs CASCADE")
 
 
 def _insert(conn, guid, status, minutes_ago=0, runpod_job_id=None):
@@ -107,55 +82,55 @@ def _insert(conn, guid, status, minutes_ago=0, runpod_job_id=None):
         return cur.fetchone()[0]
 
 
-def test_recover_stale_runs_against_postgres(db):
+def test_recover_stale_runs_against_postgres(jobs_db):
     """The statement that failed in production, executed as production runs it."""
 
-    _insert(db, "stale-guid", transcription_jobs.SUBMITTED,
+    _insert(jobs_db, "stale-guid", transcription_jobs.SUBMITTED,
             minutes_ago=999, runpod_job_id="runpod-1")
 
-    released = transcription_jobs.recover_stale(db)
+    released = transcription_jobs.recover_stale(jobs_db)
 
     assert [job["bunny_guid"] for job in released] == ["stale-guid"]
 
 
-def test_recover_stale_leaves_a_job_that_is_still_being_watched(db):
+def test_recover_stale_leaves_a_job_that_is_still_being_watched(jobs_db):
     """Lifecycle unchanged: only jobs past the window are reclaimed."""
 
-    _insert(db, "fresh-guid", transcription_jobs.PROCESSING,
+    _insert(jobs_db, "fresh-guid", transcription_jobs.PROCESSING,
             minutes_ago=0, runpod_job_id="runpod-2")
 
-    released = transcription_jobs.recover_stale(db)
+    released = transcription_jobs.recover_stale(jobs_db)
 
     assert "fresh-guid" not in [job["bunny_guid"] for job in released]
 
 
-def test_in_flight_runs_against_postgres(db):
+def test_in_flight_runs_against_postgres(jobs_db):
     """The other query that bound the same tuple."""
 
-    _insert(db, "flying-guid", transcription_jobs.SUBMITTED,
+    _insert(jobs_db, "flying-guid", transcription_jobs.SUBMITTED,
             minutes_ago=1, runpod_job_id="runpod-3")
 
-    guids = [job["bunny_guid"] for job in transcription_jobs.in_flight(db)]
+    guids = [job["bunny_guid"] for job in transcription_jobs.in_flight(jobs_db)]
 
     assert "flying-guid" in guids
 
 
-def test_a_job_with_no_runpod_id_is_not_in_flight(db):
+def test_a_job_with_no_runpod_id_is_not_in_flight(jobs_db):
     """Claimed but never submitted: nothing to poll RunPod about."""
 
-    _insert(db, "unsubmitted-guid", transcription_jobs.SUBMITTED, minutes_ago=1)
+    _insert(jobs_db, "unsubmitted-guid", transcription_jobs.SUBMITTED, minutes_ago=1)
 
-    guids = [job["bunny_guid"] for job in transcription_jobs.in_flight(db)]
+    guids = [job["bunny_guid"] for job in transcription_jobs.in_flight(jobs_db)]
 
     assert "unsubmitted-guid" not in guids
 
 
-def test_claiming_runs_against_postgres(db):
+def test_claiming_runs_against_postgres(jobs_db):
     """The claim query binds three scalars, but shares the status vocabulary."""
 
-    _insert(db, "claimable-guid", transcription_jobs.PENDING)
+    _insert(jobs_db, "claimable-guid", transcription_jobs.PENDING)
 
-    claimed = transcription_jobs.claim_for_submission(db)
+    claimed = transcription_jobs.claim_for_submission(jobs_db)
 
     assert claimed is not None and claimed["bunny_guid"] == "claimable-guid"
 
