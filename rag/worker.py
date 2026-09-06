@@ -137,7 +137,22 @@ def media_url_for(guid):
     if not bunny.is_finished(video):
         raise JobError(f"Bunny {guid} is {bunny.status_name(video)}, not Finished")
 
-    source_url = bunny.audio_source_url(video)
+    # Unsigned on purpose. This is the URL that gets checked and logged, and
+    # the signature is minted later, immediately before RunPod is called --
+    # see submit_next. A token that started ticking here would spend part of
+    # its life on the Bunny lookup and the catalog resolution above it.
+    source_url = bunny.audio_source_url(video, sign=False)
+
+    if get_settings().bunny_token_auth_key and not video.get("hasMP4Fallback"):
+        # HLS under token authentication needs path-style tokens so that each
+        # .ts segment inherits one; a query-string token signs the playlist and
+        # nothing it points at, so ffmpeg would read the manifest and then be
+        # refused every segment. Refused here rather than discovered on a GPU.
+        raise PermanentJobError(
+            f"Bunny {guid} has no MP4 fallback, and an HLS playlist cannot be "
+            "read with a query-string token. Enable MP4 fallback on the Stream "
+            "library (it applies to videos uploaded after it is switched on)."
+        )
 
     try:
         media_url.check(source_url, get_settings().bunny_media_hosts())
@@ -287,7 +302,7 @@ def submit_next(conn):
                 job["id"], guid, video_id, job["attempt_count"],
                 job["max_attempts"], length,
             )
-            run_locally(conn, job, source_url, video_id)
+            run_locally(conn, job, bunny.sign_url(source_url), video_id)
             return True
 
         if backend != "runpod":
@@ -295,7 +310,13 @@ def submit_next(conn):
                 f"unknown ASR_BACKEND {backend!r} (expected runpod or cohere)"
             )
 
-        runpod_job_id = transcribe_runpod.submit(source_url, video_id=video_id)
+        # Signed here and nowhere earlier: the shortest possible gap between
+        # the token being minted and RunPod receiving it, so the TTL is spent
+        # on the queue and the GPU rather than on our own bookkeeping. The
+        # signed form is never written to the database and never logged.
+        runpod_job_id = transcribe_runpod.submit(
+            bunny.sign_url(source_url), video_id=video_id
+        )
 
     except Exception as error:
         permanent = isinstance(error, PermanentJobError)

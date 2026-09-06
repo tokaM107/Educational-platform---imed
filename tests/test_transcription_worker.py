@@ -48,7 +48,10 @@ def no_network(monkeypatch):
     )
     monkeypatch.setattr(
         worker.bunny, "audio_source_url",
-        lambda video: "https://cdn.example/guid-1/play_240p.mp4",
+        # `sign=False` now: the worker asks for the unsigned URL and signs it
+        # immediately before submitting, so the token's life is spent on RunPod
+        # rather than on our own lookups.
+        lambda video, sign=True: "https://cdn.example/guid-1/play_240p.mp4",
     )
     monkeypatch.setattr(
         worker.get_settings(), "bunny_cdn_hostname", "cdn.example"

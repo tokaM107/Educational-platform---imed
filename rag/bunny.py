@@ -19,6 +19,7 @@ on pixels that go straight to /dev/null.
 
 import base64
 import hashlib
+import hmac
 import time
 from urllib.parse import urlencode, urlparse, urlunparse
 
@@ -302,30 +303,21 @@ def resolutions(video):
 # The security key never leaves this process. What travels is the token, which
 # is a hash -- RunPod is given a URL that expires and nothing else.
 
-TOKEN_ALGORITHMS = ("sha256", "md5")
+# Bunny documents three token forms, and a zone is configured for exactly one.
+# All three are here because they are indistinguishable from outside: the wrong
+# one is refused with the same 403 as no token at all, so a deployment cannot
+# tell by looking which it needs. `python -m rag.bunny --check-token-auth`
+# below asks the CDN and settles it in one command.
+#
+#   hmac     "HS256-" + Base64URL(HMAC-SHA256(key, path + expires))
+#            Bunny's advanced/V2 scheme, and what its Stream examples show.
+#   sha256   Base64URL(SHA256(key + path + expires))
+#   md5      Base64URL(MD5(key + path + expires))     legacy zones
+TOKEN_ALGORITHMS = ("hmac", "sha256", "md5")
 
 
-def _token(key, path, expires, algorithm):
-    """Bunny's token for one path and expiry.
-
-    Both of Bunny's documented forms are here because a pull zone can be
-    configured for either, and guessing wrong fails closed with another 403
-    that looks exactly like the one this exists to fix:
-
-        sha256   Base64(SHA256(key + path + expires))   current default
-        md5      Base64(MD5(key + path + expires))      legacy zones
-
-    The base64 is then made URL-safe the way Bunny specifies: `+` to `-`,
-    `/` to `_`, and `=` stripped.
-    """
-
-    if algorithm not in TOKEN_ALGORITHMS:
-        raise BunnyError(
-            f"unknown Bunny token algorithm {algorithm!r} "
-            f"(expected one of {', '.join(TOKEN_ALGORITHMS)})"
-        )
-
-    digest = hashlib.new(algorithm, f"{key}{path}{expires}".encode()).digest()
+def _urlsafe(digest):
+    """Base64, transformed the way Bunny specifies: + -> -, / -> _, = dropped."""
 
     return (
         base64.b64encode(digest)
@@ -333,6 +325,34 @@ def _token(key, path, expires, algorithm):
         .replace("+", "-")
         .replace("/", "_")
         .replace("=", "")
+    )
+
+
+def _token(key, path, expires, algorithm):
+    """Bunny's token for one path and expiry.
+
+    The path is signed and the query string is not, so a token is bound to one
+    file: it cannot be lifted from one lecture's URL and replayed against
+    another, and it cannot be widened by appending parameters.
+    """
+
+    if algorithm == "hmac":
+        # The key is the HMAC key here rather than part of the message, which
+        # is the difference between this and the two hash forms below.
+        digest = hmac.new(
+            key.encode(), f"{path}{expires}".encode(), hashlib.sha256
+        ).digest()
+
+        return "HS256-" + _urlsafe(digest)
+
+    if algorithm in ("sha256", "md5"):
+        digest = hashlib.new(algorithm, f"{key}{path}{expires}".encode()).digest()
+
+        return _urlsafe(digest)
+
+    raise BunnyError(
+        f"unknown Bunny token algorithm {algorithm!r} "
+        f"(expected one of {', '.join(TOKEN_ALGORITHMS)})"
     )
 
 
@@ -388,12 +408,14 @@ def redact(url):
     return urlunparse(parsed._replace(query="")) + ("?…" if parsed.query else "")
 
 
-def playlist_url(video):
+def playlist_url(video, sign=True):
     """The HLS master playlist. Always available; slower to read than an MP4."""
 
     _, _, hostname = _config()
 
-    return sign_url(f"https://{hostname}/{_require_guid(video)}/playlist.m3u8")
+    url = f"https://{hostname}/{_require_guid(video)}/playlist.m3u8"
+
+    return sign_url(url) if sign else url
 
 
 def _require_guid(video):
@@ -433,7 +455,7 @@ def pick_height(video, prefer="lowest"):
     return at_or_below[-1] if at_or_below else heights[0]
 
 
-def rendition_url(video, prefer="lowest"):
+def rendition_url(video, prefer="lowest", sign=True):
     """A URL ffmpeg can read this video from.
 
     Falls back to the HLS playlist when the library has no MP4 fallback, since
@@ -448,12 +470,13 @@ def rendition_url(video, prefer="lowest"):
     height = pick_height(video, prefer)
 
     if video.get("hasMP4Fallback") and height:
-        return sign_url(f"https://{hostname}/{guid}/play_{height}p.mp4")
+        url = f"https://{hostname}/{guid}/play_{height}p.mp4"
+        return sign_url(url) if sign else url
 
-    return playlist_url(video)
+    return playlist_url(video, sign=sign)
 
 
-def audio_source_url(video):
+def audio_source_url(video, sign=True):
     """Where to read this video's soundtrack from.
 
     The smallest rendition, deliberately. Every rendition carries the same
@@ -466,7 +489,7 @@ def audio_source_url(video):
     than one function with a default.
     """
 
-    return rendition_url(video, prefer="lowest")
+    return rendition_url(video, prefer="lowest", sign=sign)
 
 
 # -------------------------
@@ -532,6 +555,12 @@ def main(argv=None):
     show = sub.add_parser("show", help="one video in detail")
     show.add_argument("guid")
 
+    check = sub.add_parser(
+        "check-token-auth",
+        help="ask the CDN which token form this pull zone accepts",
+    )
+    check.add_argument("guid")
+
     args = parser.parse_args(argv)
 
     # A missing key or a rejected request is an ordinary thing to get wrong
@@ -542,7 +571,103 @@ def main(argv=None):
         raise SystemExit(f"bunny: {error}")
 
 
+def check_token_auth(guid):
+    """Ask the CDN, once per token form, which one this zone accepts.
+
+    Bunny's three schemes are indistinguishable from outside: the wrong one is
+    refused with the same 403 as no token at all, so a deployment cannot tell
+    by looking which its zone was configured for. This asks for one byte with
+    each and prints what came back.
+
+    Prints status codes and algorithm names only. The key is never printed, and
+    neither is a token: a token is a bearer credential for the video it names.
+    """
+
+    settings = get_settings()
+
+    # The Stream API is asked first, because it knows which renditions exist.
+    # It is not required though: this tool is most useful when something is
+    # misconfigured, and refusing to run because the API key is also wrong
+    # would be refusing exactly when it is wanted.
+    try:
+        video = get_video(guid)
+        unsigned = rendition_url(video, prefer="lowest", sign=False)
+        mp4 = "yes" if video.get("hasMP4Fallback") else "NO — HLS only"
+
+    except (BunnyError, RuntimeError, requests.RequestException) as error:
+        hostname = settings.bunny_cdn_hostname.strip().rstrip("/")
+
+        if not hostname:
+            raise BunnyError(
+                "BUNNY_STREAM_CDN_HOSTNAME is not set, and the Stream API "
+                f"could not be reached either: {error}"
+            ) from error
+
+        unsigned = f"https://{hostname}/{guid}/play_240p.mp4"
+        mp4 = f"unknown (Stream API unavailable: {error})"
+
+    key = settings.bunny_token_auth_key
+
+    print(f"video    {guid}")
+    print(f"url      {unsigned}")
+    print(f"mp4      {mp4}")
+    print(f"key      {'set' if key else 'NOT SET (BUNNY_STREAM_TOKEN_AUTH_KEY)'}")
+    print()
+
+    def probe(label, url):
+        try:
+            response = requests.get(
+                url, headers={"Range": "bytes=0-0"}, timeout=30, stream=True
+            )
+            response.close()
+            status = response.status_code
+        except requests.RequestException as error:
+            print(f"  {label:10s} could not reach the CDN: {error}")
+            return None
+
+        verdict = "ACCEPTED" if status < 400 else "refused"
+        print(f"  {label:10s} HTTP {status}  {verdict}")
+        return status
+
+    probe("unsigned", unsigned)
+
+    if not key:
+        print(
+            "\nSet BUNNY_STREAM_TOKEN_AUTH_KEY to test the signed forms. "
+            "It is in the Bunny dashboard under Stream -> your library -> "
+            "Security."
+        )
+        return 1
+
+    accepted = []
+
+    for algorithm in TOKEN_ALGORITHMS:
+        status = probe(algorithm, sign_url(unsigned, algorithm=algorithm))
+
+        if status is not None and status < 400:
+            accepted.append(algorithm)
+
+    print()
+
+    if not accepted:
+        print(
+            "No token form was accepted. Either the key is wrong, or the zone "
+            "protects files by referer only — in which case token "
+            "authentication has to be switched on for the library before a "
+            "signed URL can work."
+        )
+        return 1
+
+    print(f"Set BUNNY_TOKEN_AUTH_ALGORITHM={accepted[0]}")
+
+    return 0
+
+
 def _run(args):
+
+    if args.command == "check-token-auth":
+
+        return check_token_auth(args.guid)
 
     if args.command == "show":
 

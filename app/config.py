@@ -261,24 +261,27 @@ class Settings:
             env("RUNPOD_REQUEST_TIMEOUT_SECONDS", "60")
         )
 
-        # How long a signed Bunny media URL stays valid.
+        # How long a signed Bunny media URL stays valid. 30 minutes.
         #
-        # It has to outlive the whole job, not just the first byte. ffmpeg is
-        # run with -reconnect, so a dropped CDN connection is re-opened with
-        # the same URL part-way through a lecture, and an expired token would
-        # turn a recoverable blip into a failed transcription. The clock also
-        # starts before RunPod has a GPU: the job waits in the queue, then pays
-        # a cold start, and only then begins to read.
+        # The URL is minted immediately before the job is handed to RunPod, not
+        # when the job is queued, so none of this is spent waiting in our own
+        # table. What it has to cover is what happens after: the RunPod queue,
+        # a cold start, the download, and the transcription itself — and it has
+        # to still be valid at the end of that, because ffmpeg runs with
+        # -reconnect and re-opens the same URL if the CDN connection drops
+        # part-way through a lecture.
         #
-        # So the default is the job's own timeout plus an hour for queue and
-        # cold start. Bounded rather than generous-by-default: this URL is a
-        # bearer credential for one video, and anyone holding it can read that
-        # lecture until it expires.
+        # 30 minutes is comfortable for that. A 74-minute lecture transcribes
+        # in well under a minute of GPU at the measured RTFx, and the 240p
+        # rendition is a couple of hundred megabytes; the real variables are
+        # queue depth and cold start, which are minutes rather than tens of
+        # minutes. Raise it here if a much longer lecture or a busy endpoint
+        # ever makes that untrue — the failure would be a 403 late in a job.
+        #
+        # Short on purpose: this URL is a bearer credential for one video, and
+        # anyone holding it can read that lecture until it expires.
         self.bunny_media_url_ttl_seconds = int(
-            env(
-                "BUNNY_MEDIA_URL_TTL_SECONDS",
-                str(self.runpod_job_timeout_seconds + 3600),
-            )
+            env("BUNNY_MEDIA_URL_TTL_SECONDS", "1800")
         )
 
         # The model the GPU worker loads. Here as well as on the worker so the

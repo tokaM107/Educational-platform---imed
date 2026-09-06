@@ -39,7 +39,7 @@ def bunny_settings(monkeypatch):
     monkeypatch.setattr(settings, "bunny_cdn_hostname", HOST)
     monkeypatch.setattr(settings, "bunny_token_auth_key", KEY)
     monkeypatch.setattr(settings, "bunny_token_auth_algorithm", "sha256")
-    monkeypatch.setattr(settings, "bunny_media_url_ttl_seconds", 7200)
+    monkeypatch.setattr(settings, "bunny_media_url_ttl_seconds", 1800)
     return settings
 
 
@@ -129,20 +129,36 @@ def test_the_expiry_is_in_the_future_and_bounded():
 
     expires = int(query(signed)["expires"])
 
-    assert expires == 1_000_000 + 7200
+    assert expires == 1_000_000 + 1800
 
 
-def test_the_default_lifetime_outlives_a_whole_runpod_job():
-    """It must survive queue wait, cold start, and an ffmpeg reconnect.
+def test_the_shipped_default_lifetime_is_thirty_minutes(monkeypatch):
+    """Short, because the URL is a bearer credential for one lecture."""
+
+    from app.config import Settings
+
+    monkeypatch.delenv("BUNNY_MEDIA_URL_TTL_SECONDS", raising=False)
+
+    assert Settings().bunny_media_url_ttl_seconds == 1800
+
+
+def test_the_lifetime_covers_a_cold_start_and_a_late_reconnect():
+    """It has to still be valid at the *end* of the job, not the start.
 
     ffmpeg runs with -reconnect, so a dropped CDN connection is re-opened with
-    the same URL part-way through a lecture. A token that expired by then would
-    turn a recoverable blip into a failed transcription.
+    the same URL part-way through a lecture; a token that expired by then would
+    turn a recoverable blip into a failed transcription. The budget it has to
+    cover is queue wait plus cold start plus download plus transcription.
     """
 
     settings = get_settings()
 
-    assert settings.bunny_media_url_ttl_seconds > settings.runpod_job_timeout_seconds
+    generous_cold_start = 10 * 60
+    generous_transcription = 10 * 60
+
+    assert settings.bunny_media_url_ttl_seconds >= (
+        generous_cold_start + generous_transcription
+    )
 
 
 # ------------------------------------
@@ -403,3 +419,179 @@ def test_a_permanent_failure_keeps_the_error_and_the_identifiers(jobs_db):
     assert attempts == max_attempts
     assert guid == "guid-1"
     assert "403" in error
+
+
+# -------------------------
+# The advanced (HMAC) form
+# -------------------------
+
+
+def test_the_advanced_form_matches_bunnys_construction(monkeypatch):
+    """"HS256-" + Base64URL(HMAC-SHA256(key, path + expires))."""
+
+    import hmac as hmac_module
+
+    monkeypatch.setattr(get_settings(), "bunny_token_auth_algorithm", "hmac")
+
+    signed = bunny.sign_url(URL, ttl_seconds=1800, now=1_000_000)
+
+    path = f"/{GUID}/play_240p.mp4"
+    expires = 1_000_000 + 1800
+
+    digest = hmac_module.new(
+        KEY.encode(), f"{path}{expires}".encode(), hashlib.sha256
+    ).digest()
+
+    expected = "HS256-" + (
+        b64encode(digest).decode()
+        .replace("+", "-").replace("/", "_").replace("=", "")
+    )
+
+    assert query(signed)["token"] == expected
+
+
+def test_the_advanced_form_is_marked_so_bunny_recognises_it(monkeypatch):
+    monkeypatch.setattr(get_settings(), "bunny_token_auth_algorithm", "hmac")
+
+    assert query(bunny.sign_url(URL))["token"].startswith("HS256-")
+
+
+@pytest.mark.parametrize("algorithm", ["hmac", "sha256", "md5"])
+def test_every_supported_form_signs_the_path_and_not_the_query(algorithm):
+    """A token must not be widenable by appending parameters."""
+
+    a = bunny.sign_url(URL, algorithm=algorithm, ttl_seconds=60, now=0)
+    b = bunny.sign_url(URL, algorithm=algorithm, ttl_seconds=60, now=0)
+
+    assert query(a)["token"] == query(b)["token"]
+
+
+@pytest.mark.parametrize("algorithm", ["hmac", "sha256", "md5"])
+def test_no_form_leaks_the_key(algorithm):
+    assert KEY not in bunny.sign_url(URL, algorithm=algorithm)
+
+
+# -------------------------
+# Expiry
+# -------------------------
+
+
+def test_an_expired_url_carries_a_past_expiry():
+    """What Bunny compares against. An expired token is refused, by design."""
+
+    import time
+
+    signed = bunny.sign_url(URL, ttl_seconds=1, now=time.time() - 3600)
+
+    assert int(query(signed)["expires"]) < time.time()
+
+
+def test_a_fresh_url_carries_a_future_expiry():
+    import time
+
+    assert int(query(bunny.sign_url(URL))["expires"]) > time.time()
+
+
+def test_an_expired_url_is_still_refused_by_the_ssrf_check_if_the_host_is_wrong():
+    """Expiry and host are independent; neither substitutes for the other."""
+
+    import time
+
+    hosts = media_url.bunny_hosts(HOST)
+
+    stale = bunny.sign_url(
+        "https://evil.test/x.mp4", key=KEY, ttl_seconds=1, now=time.time() - 3600
+    )
+
+    with pytest.raises(media_url.UntrustedMediaURL):
+        media_url.check(stale, hosts)
+
+
+def test_a_bunny_403_from_an_expired_token_is_classified_permanent():
+    """Retrying with the same expired URL would fail identically."""
+
+    from rag import worker
+
+    assert worker.is_media_refusal("ffmpeg: HTTP error 403 Forbidden")
+
+
+# ----------------------------------------
+# Minted late, and never stored
+# ----------------------------------------
+
+
+def test_the_worker_checks_an_unsigned_url_and_submits_a_signed_one(monkeypatch):
+    """The TTL must not be spent on our own lookups, or on the queue."""
+
+    from app.services import transcription_jobs
+    from rag import worker
+    from tests.fake_db import FakeConn
+
+    submitted = []
+
+    monkeypatch.setattr(worker.bunny, "get_video", lambda guid: video(guid))
+    monkeypatch.setattr(
+        worker.transcribe_runpod, "submit",
+        lambda url, video_id=None, chunk_seconds=None: submitted.append(url) or "rp-1",
+    )
+    monkeypatch.setattr(get_settings(), "asr_backend", "runpod")
+    monkeypatch.setattr(get_settings(), "bunny_media_hosts_extra", "")
+
+    claims = iter([{
+        "id": 1, "bunny_guid": GUID, "video_id": 17,
+        "attempt_count": 1, "max_attempts": 3, "runpod_job_id": None,
+    }])
+    monkeypatch.setattr(transcription_jobs, "claim_for_submission",
+                        lambda conn: next(claims, None))
+    for name in ("mark_submitted", "mark_failed"):
+        monkeypatch.setattr(transcription_jobs, name, lambda *a, **k: None)
+
+    worker.submit_next(FakeConn())
+
+    assert len(submitted) == 1
+    assert "token=" in submitted[0] and "expires=" in submitted[0]
+
+
+def test_no_signed_url_is_written_to_the_queue(monkeypatch):
+    """Requirement of a short TTL: the row must not outlive the token."""
+
+    from app.services import transcription_jobs
+    from rag import worker
+    from tests.fake_db import FakeConn
+
+    conn = FakeConn()
+
+    monkeypatch.setattr(worker.bunny, "get_video", lambda guid: video(guid))
+    monkeypatch.setattr(
+        worker.transcribe_runpod, "submit",
+        lambda url, video_id=None, chunk_seconds=None: "rp-1",
+    )
+    monkeypatch.setattr(get_settings(), "asr_backend", "runpod")
+
+    claims = iter([{
+        "id": 1, "bunny_guid": GUID, "video_id": 17,
+        "attempt_count": 1, "max_attempts": 3, "runpod_job_id": None,
+    }])
+    monkeypatch.setattr(transcription_jobs, "claim_for_submission",
+                        lambda conn: next(claims, None))
+    monkeypatch.setattr(transcription_jobs, "mark_submitted",
+                        lambda *a, **k: None)
+
+    worker.submit_next(conn)
+
+    assert not any("token=" in str(params) for _, params in conn.calls)
+
+
+def test_a_video_with_no_mp4_fallback_is_refused_before_a_gpu_starts(monkeypatch):
+    """A query-string token signs the playlist, not the segments it points at."""
+
+    from rag import worker
+
+    hls = dict(video(), hasMP4Fallback=False)
+
+    monkeypatch.setattr(worker.bunny, "get_video", lambda guid: hls)
+
+    with pytest.raises(worker.PermanentJobError) as caught:
+        worker.media_url_for(GUID)
+
+    assert "MP4 fallback" in str(caught.value)
