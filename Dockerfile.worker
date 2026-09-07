@@ -42,6 +42,4 @@ USER appuser
 
 STOPSIGNAL SIGTERM
 
-# Background worker only.
-# No EXPOSE and no HTTP HEALTHCHECK are required.
-CMD ["python", "-u", "-m", "rag.worker"]
+ENTRYPOINT ["python", "-u", "-m", "rag.worker"]
