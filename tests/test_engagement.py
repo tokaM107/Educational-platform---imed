@@ -52,6 +52,8 @@ def test_a_seek_is_not_watch_time():
     # would have claimed 410.
     assert totals.watch_time_seconds == 30
     assert totals.seek_count == 1
+    assert totals.forward_seek_count == 1
+    assert totals.backward_seek_count == 0
 
 
 def test_seeking_backwards_counts_the_stretch_twice():
@@ -68,6 +70,17 @@ def test_seeking_backwards_counts_the_stretch_twice():
     # The student only ever saw the first minute of video, but sat through it
     # twice; last-minus-first video_ts would have claimed 60.
     assert totals.watch_time_seconds == 120
+    assert totals.backward_seek_count == 1
+
+
+def test_playback_rate_changes_coverage_but_not_actual_watch_time():
+    events = [
+        engagement.Event("play", 0, START, "s1", 2.0),
+        engagement.Event("pause", 60, START + timedelta(seconds=30), "s1", 2.0),
+    ]
+    totals = engagement.replay(events)
+    assert totals.watch_time_seconds == 30
+    assert engagement.covered_seconds(totals.watched_spans) == 60
 
 
 def test_hidden_page_is_time_away_not_watch_time():

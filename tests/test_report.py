@@ -32,6 +32,13 @@ def test_week_window_is_anchored_to_local_midnight():
     ).replace(hour=1)
 
 
+def test_completion_window_includes_modern_course_item_events():
+    """A completion report must not disappear when only ``video_id`` is set."""
+
+    assert "LEFT JOIN course_items AS item ON item.id = v.video_id" in report.FULL_SQL
+    assert "COALESCE(l.course_id, item.course_id)" in report.FULL_SQL
+
+
 def test_rate_separates_unknown_from_zero():
     """None means "no denominator"; 0 means "measured, and it is zero"."""
 

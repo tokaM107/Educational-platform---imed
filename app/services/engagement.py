@@ -50,6 +50,7 @@ class Event(NamedTuple):
     video_ts: float
     created_at: datetime
     session_id: str = ""
+    playback_rate: float = 1.0
 
 
 class Span(NamedTuple):
@@ -71,6 +72,8 @@ class Engagement(NamedTuple):
     session_duration_seconds: float
     pause_count: int
     seek_count: int
+    backward_seek_count: int
+    forward_seek_count: int
     rewatch_count: int
     completed: bool
 
@@ -110,7 +113,8 @@ def replay(events, max_gap=MAX_PLAYING_GAP):
     timestamp to measure the absence against, and inventing one would be a
     guess dressed up as data.
 
-    Real elapsed time is what gets counted, so the numbers assume 1x playback.
+    Real elapsed time is watch time.  Playback rate affects only which content
+    span was covered (30 real seconds at 2x covers 60 video seconds).
 
     `max_gap` caps how much a single gap between events may contribute; pass
     None to credit gaps in full.
@@ -129,10 +133,14 @@ def replay(events, max_gap=MAX_PLAYING_GAP):
     anchor_ts = 0.0          # where the playhead was when that stretch began
     hidden_at = None         # when the page went away
     playing_when_hidden = False
+    playback_rate = 1.0
+    backward_seeks = 0
+    forward_seeks = 0
 
     for event in ordered:
 
         moment = event.created_at
+        elapsed = 0.0
 
         if playing and anchor is not None:
 
@@ -148,7 +156,15 @@ def replay(events, max_gap=MAX_PLAYING_GAP):
             # rather than from the next event's video_ts, because that one may
             # have jumped (a seek) or drifted (a hidden tab).
             if elapsed > 0:
-                spans.append(Span(anchor_ts, anchor_ts + elapsed))
+                spans.append(Span(anchor_ts, anchor_ts + elapsed * playback_rate))
+
+        expected_position = anchor_ts + (elapsed * playback_rate if playing and anchor is not None else 0)
+
+        if event.event_type == "seek":
+            if event.video_ts < expected_position - 2:
+                backward_seeks += 1
+            elif event.video_ts > expected_position + 2:
+                forward_seeks += 1
 
         anchor = moment
 
@@ -159,6 +175,7 @@ def replay(events, max_gap=MAX_PLAYING_GAP):
 
         if event.event_type in ("play", "heartbeat"):
             playing = True
+            playback_rate = max(event.playback_rate or 1.0, 0.25)
 
         elif event.event_type in ("pause", "complete"):
             playing = False
@@ -193,6 +210,8 @@ def replay(events, max_gap=MAX_PLAYING_GAP):
         session_duration_seconds=round(span, 1),
         pause_count=types.count("pause"),
         seek_count=types.count("seek"),
+        backward_seek_count=backward_seeks,
+        forward_seek_count=forward_seeks,
         rewatch_count=types.count("rewatch_segment"),
         completed="complete" in types,
         watched_spans=tuple(spans),
@@ -359,6 +378,8 @@ def replay_sessions(events, max_gap=MAX_PLAYING_GAP):
         ),
         pause_count=sum(item.pause_count for item in totals),
         seek_count=sum(item.seek_count for item in totals),
+        backward_seek_count=sum(item.backward_seek_count for item in totals),
+        forward_seek_count=sum(item.forward_seek_count for item in totals),
         rewatch_count=sum(item.rewatch_count for item in totals),
         completed=any(item.completed for item in totals),
         # Coverage is a property of the lecture, not of one sitting: finishing
@@ -374,7 +395,8 @@ FETCH_SQL = """
         event_type,
         video_ts,
         created_at,
-        session_id
+        session_id,
+        COALESCE(playback_rate, 1.0)
     FROM video_events
     WHERE student_id = %(student_id)s
       AND lecture_id = %(lecture_id)s
@@ -422,9 +444,87 @@ def fetch_events(conn, student_id, lecture_id, session_id=None, since=None, unti
                 video_ts=float(row[1] if row[1] is not None else 0.0),
                 created_at=row[2],
                 session_id=row[3] or "",
+                playback_rate=float(row[4] or 1.0),
             )
             for row in cur.fetchall()
         ]
+
+
+FETCH_MANY_SQL = """
+    SELECT lecture_id, event_type, video_ts, created_at, session_id,
+           COALESCE(playback_rate, 1.0)
+    FROM video_events
+    WHERE student_id = %(student_id)s
+      AND lecture_id = ANY(%(lecture_ids)s)
+      AND (%(since)s::timestamptz IS NULL OR created_at >= %(since)s)
+      AND (%(until)s::timestamptz IS NULL OR created_at < %(until)s)
+    ORDER BY lecture_id, created_at, id
+"""
+
+
+def fetch_events_for_lectures(conn, student_id, lecture_ids, since=None, until=None):
+    """All course events in one ordered query (avoids one query per lecture)."""
+
+    grouped = {lecture_id: [] for lecture_id in lecture_ids}
+    if not lecture_ids:
+        return grouped
+
+    with conn.cursor() as cur:
+        cur.execute(
+            FETCH_MANY_SQL,
+            {
+                "student_id": student_id,
+                "lecture_ids": list(lecture_ids),
+                "since": since,
+                "until": until,
+            },
+        )
+        for row in cur.fetchall():
+            grouped.setdefault(row[0], []).append(
+                Event(
+                    event_type=row[1],
+                    video_ts=float(row[2] if row[2] is not None else 0.0),
+                    created_at=row[3],
+                    session_id=row[4] or "",
+                    playback_rate=float(row[5] or 1.0),
+                )
+            )
+
+    return grouped
+
+
+FETCH_RESOURCES_SQL = """
+    SELECT lecture_id, video_id, event_type, video_ts, created_at, session_id,
+           COALESCE(playback_rate, 1.0)
+    FROM video_events
+    WHERE student_id = %(student_id)s
+      AND ((lecture_id IS NOT NULL AND lecture_id = ANY(%(lecture_ids)s))
+        OR (video_id IS NOT NULL AND video_id = ANY(%(video_ids)s)))
+      AND (%(since)s::timestamptz IS NULL OR created_at >= %(since)s)
+      AND (%(until)s::timestamptz IS NULL OR created_at < %(until)s)
+    ORDER BY COALESCE(lecture_id, video_id), created_at, id
+"""
+
+
+def fetch_events_for_resources(conn, student_id, lecture_ids, video_ids,
+                               since=None, until=None):
+    """Events for legacy lectures and modern course-item videos in one query."""
+
+    grouped = {}
+    if not lecture_ids and not video_ids:
+        return grouped
+    with conn.cursor() as cur:
+        cur.execute(FETCH_RESOURCES_SQL, {
+            "student_id": student_id, "lecture_ids": list(lecture_ids),
+            "video_ids": list(video_ids), "since": since, "until": until,
+        })
+        for row in cur.fetchall():
+            key = ("lecture", row[0]) if row[0] is not None else ("video", row[1])
+            grouped.setdefault(key, []).append(Event(
+                event_type=row[2], video_ts=float(row[3] or 0), created_at=row[4],
+                session_id=row[5] or "", playback_rate=float(row[6] or 1),
+            ))
+    return grouped
 
 
 def lecture_duration(conn, lecture_id):
@@ -474,6 +574,8 @@ def summarise(conn, student_id, lecture_id, session_id=None):
         "session_duration_seconds": totals.session_duration_seconds,
         "pause_count": totals.pause_count,
         "seek_count": totals.seek_count,
+        "backward_seek_count": totals.backward_seek_count,
+        "forward_seek_count": totals.forward_seek_count,
         "rewatch_count": totals.rewatch_count,
         "completed": totals.completed,
     }

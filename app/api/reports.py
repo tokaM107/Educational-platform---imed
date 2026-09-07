@@ -44,6 +44,8 @@ SUBJECTS_SQL = """
     JOIN courses AS c ON c.id = en.course_id
     JOIN users AS d ON d.id = c.doctor_id
     WHERE {scope}
+      AND en.status = 'active'
+      AND (en.expires_at IS NULL OR en.expires_at > now())
     ORDER BY u.name, c.title
 """
 
@@ -115,7 +117,12 @@ def weekly_report(
 
     target = current_user["id"] if student_id is None else student_id
 
-    if not authz.may_view_student(conn, current_user, target):
+    allowed = (
+        authz.may_view_student_course(conn, current_user, target, course_id)
+        if course_id is not None else
+        authz.may_view_student(conn, current_user, target)
+    )
+    if not allowed:
         raise HTTPException(
             status_code=403,
             detail="Not allowed to read this student's report",
@@ -162,7 +169,9 @@ def stored_report(
     if owner is None:
         raise HTTPException(status_code=404, detail="Report not found")
 
-    if not authz.may_view_student(conn, current_user, owner[0]):
+    if not authz.may_view_student_course(
+        conn, current_user, owner[0], owner[1]
+    ):
         raise HTTPException(
             status_code=403,
             detail="Not allowed to read this report",

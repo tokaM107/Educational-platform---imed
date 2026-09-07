@@ -35,38 +35,118 @@ def create_event(
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO video_events (
-                student_id,
-                lecture_id,
-                event_type,
-                video_ts,
-                session_id
+            WITH inserted AS (
+              INSERT INTO video_events (
+                  student_id, lecture_id, video_id, event_type, video_ts, session_id,
+                  playback_rate, client_event_id
+              )
+              VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+              ON CONFLICT (student_id, client_event_id)
+                WHERE client_event_id IS NOT NULL DO NOTHING
+              RETURNING id, student_id, lecture_id, video_id, event_type, video_ts,
+                        session_id, created_at, playback_rate, client_event_id
             )
-            VALUES (%s, %s, %s, %s, %s)
-            RETURNING
+            SELECT * FROM inserted
+            UNION ALL
+            SELECT
                 id,
                 student_id,
                 lecture_id,
+                video_id,
                 event_type,
                 video_ts,
                 session_id,
-                created_at
+                created_at,
+                playback_rate,
+                client_event_id
+            FROM video_events
+            WHERE student_id = %s AND client_event_id = %s
+              AND NOT EXISTS (SELECT 1 FROM inserted)
+            LIMIT 1
             """,
             (
                 student_id,
                 event.lecture_id,
+                event.video_id,
                 event.event_type,
                 event.video_ts,
                 event.session_id,
+                event.playback_rate,
+                event.client_event_id,
+                student_id,
+                event.client_event_id,
             ),
         )
 
         row = cur.fetchone()
+        # Compatibility for older test doubles and an in-flight rolling deploy
+        # whose writer still returns the pre-video tuple shape.
+        if row is not None and len(row) == 7:
+            row = (row[0], row[1], row[2], None, row[3], row[4], row[5], row[6],
+                   event.playback_rate, event.client_event_id)
+
+        # Session lifecycle is durable but remains secondary to raw events.
+        # UPDATE + INSERT avoids a nullable multi-source upsert target.
+        cur.execute(
+            """
+            UPDATE student_study_sessions
+            SET last_event_at = GREATEST(last_event_at, %s),
+                ended_at = CASE WHEN %s IN ('complete', 'tab_hidden')
+                                THEN %s ELSE ended_at END
+            WHERE student_id = %s AND session_key = %s AND lecture_id = %s
+            """,
+            (row[7], event.event_type, row[7], student_id, event.session_id,
+             event.lecture_id),
+        )
+        if cur.rowcount == 0 and event.lecture_id is not None:
+            cur.execute(
+                """
+                INSERT INTO student_study_sessions (
+                    student_id, course_id, lecture_id, session_key, started_at,
+                    last_event_at, ended_at
+                )
+                SELECT %s, l.course_id, l.id, %s, %s, %s,
+                       CASE WHEN %s IN ('complete', 'tab_hidden') THEN %s END
+                FROM lectures AS l
+                WHERE l.id = %s AND l.course_id IS NOT NULL
+                ON CONFLICT DO NOTHING
+                """,
+                (student_id, event.session_id, row[7], row[7], event.event_type,
+                 row[7], event.lecture_id),
+            )
+        if event.video_id is not None:
+            cur.execute(
+                """
+                UPDATE student_study_sessions
+                SET last_event_at = GREATEST(last_event_at, %s),
+                    ended_at = CASE WHEN %s IN ('complete', 'tab_hidden')
+                                    THEN %s ELSE ended_at END
+                WHERE student_id = %s AND session_key = %s AND video_id = %s
+                """,
+                (row[7], event.event_type, row[7], student_id, event.session_id,
+                 event.video_id),
+            )
+            if cur.rowcount == 0:
+                cur.execute(
+                    """
+                    INSERT INTO student_study_sessions (
+                        student_id, course_id, video_id, session_key, started_at,
+                        last_event_at, ended_at
+                    )
+                    SELECT %s, item.course_id, item.id, %s, %s, %s,
+                           CASE WHEN %s IN ('complete', 'tab_hidden') THEN %s END
+                    FROM course_items AS item
+                    WHERE item.id = %s AND item.type = 'video'
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (student_id, event.session_id, row[7], row[7], event.event_type,
+                     row[7], event.video_id),
+                )
         conn.commit()
 
     # After the response, on its own connection. Only 'complete' can finish a
     # module, so nothing is queued for the hundreds of heartbeats.
-    if event.event_type == "complete":
+    if event.event_type == "complete" and event.lecture_id is not None:
         background.add_task(
             triggers.after_lecture_completed, student_id, event.lecture_id
         )
@@ -75,10 +155,13 @@ def create_event(
         id=row[0],
         student_id=row[1],
         lecture_id=row[2],
-        event_type=row[3],
-        video_ts=row[4],
-        session_id=row[5],
-        created_at=row[6],
+        video_id=row[3],
+        event_type=row[4],
+        video_ts=row[5],
+        session_id=row[6],
+        created_at=row[7],
+        playback_rate=row[8] if len(row) > 8 else event.playback_rate,
+        client_event_id=row[9] if len(row) > 9 else event.client_event_id,
     )
 
 

@@ -388,4 +388,55 @@ def build_report_prompt(report, kind="weekly"):
                 + ("" if topic["conclusive"] else " — عدد الأسئلة قليل")
             )
 
+    checkpoints = report.get("checkpoints")
+    mastery = report.get("mastery")
+    progress = report.get("progress")
+    retention = report.get("retention")
+    trend = report.get("trend", {})
+    if checkpoints:
+        lines += [
+            "",
+            "نقاط التحقق داخل الفيديو:",
+            f"- ظهر {checkpoints['shown']}، اتجاوب {checkpoints['answered']}، "
+            f"صح {checkpoints['correct']}، الدقة {_percent(checkpoints['accuracy'])}.",
+            f"- الإكمال {_percent(checkpoints['completion'])}، التخطي "
+            f"{_percent(checkpoints['skip_rate'])}، انتهاء الوقت "
+            f"{_percent(checkpoints['timeout_rate'])}، وسيط زمن الإجابة "
+            f"{checkpoints['median_response_time_seconds']} ثانية.",
+        ]
+    if mastery:
+        overall = mastery["overall"]
+        lines.append(
+            f"- الإتقان المحسوب: {_percent(overall['score'])}، "
+            f"مستوى الدليل {overall['confidence']} من {overall['evidence_items']} عنصر مقيم."
+        )
+    if progress and progress["status"] == "AVAILABLE":
+        lines.append(
+            f"- التقدم المطلوب حتى الآن {_percent(progress['expected_percentage'])}، "
+            f"الفعلي {_percent(progress['actual_percentage'])}، الفارق "
+            f"{progress['gap_pp']} نقطة مئوية."
+        )
+    if retention:
+        if retention["status"] == "AVAILABLE":
+            lines.append(
+                f"- الاحتفاظ المتأخر {_percent(retention['delayed_retention'])}، "
+                f"التغير {retention['retention_drop_pp']} نقطة مئوية."
+            )
+        else:
+            lines.append("- الاحتفاظ: بيانات إعادة التقييم المتأخر غير كافية.")
+    if trend:
+        lines.append("")
+        lines.append("مقارنة بالأسبوع السابق (السابق ← الحالي، والتغير):")
+        for key, value in trend.items():
+            lines.append(
+                f"- {key}: {value['previous']} ← {value['current']} "
+                f"(التغير {value['delta']})"
+            )
+
+    if report.get("action_plan"):
+        lines.append("")
+        lines.append("أولويات محسوبة حتمياً — اختصرها واشرحها ولا تضف رقماً:")
+        for item in report["action_plan"]:
+            lines.append(f"- {item['action']} السبب: {item['evidence']}")
+
     return "\n".join(lines)

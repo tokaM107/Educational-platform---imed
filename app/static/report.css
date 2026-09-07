@@ -442,6 +442,26 @@ ul.plain li { margin-bottom: 7px; }
 
 .generated { font-size: 0.77rem; color: var(--ink-faint); margin: 16px 0 0; }
 
+.report-page { margin-bottom: 18px; }
+.page-title { display: flex; gap: 12px; align-items: center; margin: 2px 0 14px; }
+.page-title span { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; background: var(--accent); color: #fff; font-weight: 700; }
+.page-title h1 { font-size: 1.25rem; }
+.compact { padding: 18px 20px; }
+.analytics-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.analytic { border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px; }
+.analytic span, .analytic small { display: block; color: var(--ink-soft); font-size: .74rem; }
+.analytic b { display: block; font-size: 1.05rem; margin: 2px 0; }
+.trend-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; direction: rtl; }
+.trend-grid div { padding: 8px; background: var(--line-soft); border-radius: 8px; }
+.trend-grid span, .trend-grid small { display: block; font-size: .7rem; color: var(--ink-soft); }
+.trend-grid b { direction: ltr; display: block; font-size: .82rem; }
+.evidence-line { margin: 10px 0 0; font-size: .8rem; color: var(--ink-soft); }
+.learning-table > div { display: grid; grid-template-columns: 1.5fr repeat(4, 1fr); gap: 8px; padding: 8px; border-bottom: 1px solid var(--line-soft); font-size: .78rem; }
+.learning-table .table-head { color: var(--ink-soft); font-weight: 650; }
+.caution { background: var(--warn-soft); border-radius: 8px; padding: 8px 10px; margin: 10px 0 0; color: #7c4a06; font-size: .77rem; }
+.gap-row { display: grid; grid-template-columns: 1.5fr .6fr 1fr; gap: 10px; font-size: .8rem; padding: 8px 0; border-bottom: 1px solid var(--line-soft); }
+.plan small { color: var(--ink-faint); }
+
 /* ---------- Footnote ---------- */
 
 .footnote { font-size: 0.81rem; color: var(--ink-soft); background: var(--line-soft); border-radius: 12px; padding: 16px 20px; }
@@ -458,7 +478,7 @@ code { background: var(--line-soft); border-radius: 5px; padding: 1px 5px; font-
  * keep in step with this one.
  */
 
-@page { margin: 13mm; }
+@page { size: A4; margin: 13mm; }
 
 @media print {
 
@@ -467,6 +487,9 @@ code { background: var(--line-soft); border-radius: 5px; padding: 1px 5px; font-
   .toolbar { display: none; }
 
   .sheet { margin: 0; padding: 0; max-width: none; }
+
+  .report-page { page-break-after: always; break-after: page; height: 270mm; overflow: hidden; margin: 0; }
+  .report-page:last-child { page-break-after: auto; break-after: auto; }
 
   .card, .lecture {
     border-color: #d8dfe7;
@@ -499,4 +522,6 @@ code { background: var(--line-soft); border-radius: 5px; padding: 1px 5px; font-
   .topic { grid-template-columns: 1fr auto; }
   .topic .meter { grid-column: 1 / -1; }
   .cover-hero { gap: 18px; }
+  .analytics-grid, .trend-grid { grid-template-columns: 1fr 1fr; }
+  .learning-table > div { grid-template-columns: 1.5fr repeat(2, 1fr); }
 }

@@ -1,7 +1,8 @@
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
+from uuid import UUID
 
 
 # What the player sends. `skip` and `rewatch_segment` are not captured by the
@@ -33,10 +34,19 @@ class Event(BaseModel):
     the engagement figures take entirely on trust.
     """
 
-    lecture_id: int
+    lecture_id: int | None = None
+    video_id: int | None = None
     event_type: EventType
     video_ts: float
-    session_id: str
+    session_id: str = Field(min_length=1, max_length=64)
+    playback_rate: float | None = Field(default=None, ge=0.25, le=4.0)
+    client_event_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def one_content_source(self):
+        if (self.lecture_id is None) == (self.video_id is None):
+            raise ValueError("provide exactly one of lecture_id or video_id")
+        return self
 
 
 class EventResponse(Event):
@@ -61,7 +71,8 @@ class SessionAnalytics(BaseModel):
     """
 
     student_id: int
-    lecture_id: int
+    lecture_id: int | None
+    video_id: int | None = None
 
     # None when the numbers cover every session on the lecture, not just one.
     session_id: str | None
@@ -80,5 +91,7 @@ class SessionAnalytics(BaseModel):
 
     pause_count: int
     seek_count: int
+    backward_seek_count: int
+    forward_seek_count: int
     rewatch_count: int
     completed: bool

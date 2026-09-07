@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from google.genai import errors as genai_errors
 
-from app.api import (auth, chat, events, exams, lectures, notifications,
+from app.api import (auth, chat, checkpoints, events, exams, lectures, notifications,
                      questions, reports, search, subscriptions, transcriptions,
                      videos, webhooks)
 from app.config import get_settings
@@ -59,6 +59,7 @@ app.include_router(auth.router)
 app.include_router(lectures.router)
 app.include_router(videos.router)
 app.include_router(chat.router)
+app.include_router(checkpoints.router)
 app.include_router(events.router)
 app.include_router(questions.router)
 app.include_router(reports.router)

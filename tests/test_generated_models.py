@@ -15,8 +15,12 @@ from app.db import _generated_models, models
 # database without a migration disappears from the generated file, and this
 # list is what notices.
 EXPECTED_TABLES = {
+    "assessment_question_results",
     "chat_messages",
     "chat_sessions",
+    "checkpoint_attempts",
+    "checkpoint_questions",
+    "course_weekly_assignments",
     "courses",
     "enrollments",
     "lectures",
@@ -29,12 +33,15 @@ EXPECTED_TABLES = {
     "refresh_tokens",
     "report_narratives",
     "reports",
+    "retention_assessment_results",
+    "student_study_sessions",
     "subjects",
     "subscriptions",
     "topics",
     "transcript_chunks",
     "users",
     "video_events",
+    "weekly_analytics_snapshots",
 }
 
 

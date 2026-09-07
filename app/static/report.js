@@ -216,7 +216,12 @@ function cover(data) {
   const hero = data.totals
     ? `
       <div class="cover-hero">
-        ${ring(data.totals.coverage_percentage, "من مادة الأسبوع")}
+        ${ring(
+          data.progress?.status === "AVAILABLE"
+            ? data.progress.actual_percentage
+            : data.totals.coverage_percentage,
+          data.progress?.status === "AVAILABLE" ? "من المادة المطلوبة" : "من محتوى الكورس"
+        )}
         <div class="cover-week">
           ${weekBars(data.totals.daily)}
           <p class="cover-week-note">
@@ -381,7 +386,7 @@ function verdict(lecture) {
 
   if (lecture.rewatched_spans.length) {
     parts.push(
-      `رجعت سمعت ${lecture.rewatched_spans.length} جزء تاني — غالباً الجزء الصعب.`
+      `رجعت سمعت ${lecture.rewatched_spans.length} جزء تاني؛ دي ملاحظة مشاهدة ومش حكم على السبب.`
     );
   }
 
@@ -602,6 +607,98 @@ function footnote(data) {
     </section>`;
 }
 
+function delta(point, suffix = " نقطة") {
+  if (!point || point.delta === null || point.delta === undefined) return "لا توجد مقارنة";
+  const sign = point.delta > 0 ? "+" : "";
+  return `${sign}${point.delta}${suffix}`;
+}
+
+function overviewAnalytics(data) {
+  const t = data.totals;
+  const cp = data.checkpoints || {};
+  const mastery = data.mastery?.overall || {};
+  const progress = data.progress || {};
+  const trendRows = [
+    ["التغطية", data.trend?.coverage_percentage, "%"],
+    ["أيام المذاكرة", data.trend?.active_days, ""],
+    ["دقة نقاط التحقق", data.trend?.checkpoint_accuracy, "%"],
+    ["دقة الاختبار", data.trend?.quiz_accuracy, "%"],
+    ["الإتقان", data.trend?.mastery, "%"],
+  ].filter(([, point]) => point && (point.current !== null || point.previous !== null));
+
+  const card = (label, value, note) => `
+    <div class="analytic"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b>
+      <small>${escapeHtml(note)}</small></div>`;
+
+  return `
+    <section class="card compact">
+      <h2>نظرة الأسبوع</h2>
+      <div class="analytics-grid">
+        ${card("التغطية الفريدة", percent(t.coverage_percentage), `${duration(t.covered_seconds)} بدون تكرار الإعادة`)}
+        ${card("وقت المشاهدة الفعلي", duration(t.watch_time_seconds), `${t.lectures_completed}/${t.lectures_registered} محاضرات مكتملة`)}
+        ${card("نقاط التحقق", cp.shown ? `${cp.correct}/${cp.answered}` : "بيانات غير كافية", cp.shown ? `ظهرت ${cp.shown} · الإكمال ${percent(cp.completion)}` : "لم تظهر نقاط تحقق")}
+        ${card("الاختبارات", t.questions_attempted ? `${t.questions_correct}/${t.questions_attempted}` : "بيانات غير كافية", t.questions_attempted ? `الدقة ${percent(t.accuracy)}` : "لا توجد إجابات")}
+        ${card("الإتقان", mastery.score === null || mastery.score === undefined ? "بيانات غير كافية" : percent(mastery.score), `قوة الدليل ${mastery.confidence || "LOW"}`)}
+        ${card("نسبة الجلسة النشطة", percent(data.efficiency?.active_session_ratio), "وقت تشغيل الفيديو ÷ وقت الجلسة")}
+      </div>
+    </section>
+    <section class="card compact">
+      <h2>مقارنة بنفسك</h2>
+      <div class="trend-grid">${trendRows.map(([label, point, unit]) => `
+        <div><span>${escapeHtml(label)}</span><b>${point.previous ?? "—"}${unit} ← ${point.current ?? "—"}${unit}</b>
+        <small>${escapeHtml(delta(point, label === "أيام المذاكرة" ? " يوم" : " نقطة مئوية"))}</small></div>`).join("")}</div>
+      ${progress.status === "AVAILABLE" ? `<p class="evidence-line">المطلوب حتى الآن ${percent(progress.expected_percentage)}، الفعلي ${percent(progress.actual_percentage)}، الفارق ${progress.gap_pp} نقطة مئوية.</p>` : `<p class="evidence-line">التقدم المتوقع: بيانات الجدول الأسبوعي غير متاحة، لذلك لم نختلق هدفاً.</p>`}
+    </section>`;
+}
+
+function learningAnalytics(data) {
+  const topics = (data.mastery?.topics || []).slice(0, 5);
+  const lecturesNeedingWork = data.lectures
+    .filter((item) => item.opened && ((item.coverage_percentage ?? 100) < 80 || item.skipped_spans.length))
+    .slice(0, 3);
+  const cp = data.checkpoints || {};
+
+  return `
+    <section class="card compact">
+      <h2>الفهم والإتقان حسب الموضوع</h2>
+      ${topics.length ? `<div class="learning-table">
+        <div class="table-head"><span>الموضوع</span><span>تغطية</span><span>نقاط تحقق</span><span>اختبار</span><span>إتقان / دليل</span></div>
+        ${topics.map((row) => `<div><span>${escapeHtml(row.topic)}</span><span>${percent(row.coverage)}</span><span>${percent(row.checkpoint_accuracy)}</span><span>${percent(row.quiz_accuracy)}</span><span>${percent(row.score)} · ${escapeHtml(row.confidence)}</span></div>`).join("")}
+      </div>` : `<p class="prose">لا توجد أسئلة مصنفة حسب الموضوع هذا الأسبوع؛ لذلك لا يوجد حكم على الإتقان.</p>`}
+    </section>
+    <section class="card compact">
+      <h2>دليل الانتباه داخل المحاضرة</h2>
+      <p class="prose">${cp.shown ? `${cp.answered}/${cp.shown} اتجاوبوا، ${cp.correct} صح، وسيط زمن الإجابة ${cp.median_response_time_seconds ?? "—"} ثانية. التخطي ${percent(cp.skip_rate)} وانتهاء الوقت ${percent(cp.timeout_rate)}.` : "لم تتوفر محاولات نقاط تحقق."}</p>
+      <p class="caution">هذه ملاحظات خام. الوقفات والرجوع في الفيديو قد يكونان تعلماً نشطاً، وليسا دليلاً على ضعف التركيز.</p>
+    </section>
+    <section class="card compact">
+      <h2>أهم فجوات المشاهدة</h2>
+      ${lecturesNeedingWork.length ? lecturesNeedingWork.map((lecture) => `<div class="gap-row"><b>${escapeHtml(lecture.title)}</b><span>تغطية ${percent(lecture.coverage_percentage)}</span><span>${lecture.skipped_spans.slice(0, 2).map((s) => `${s.start_label}–${s.end_label}`).join("، ") || "لم تُستكمل"}</span></div>`).join("") : `<p class="prose">لا توجد فجوات مشاهدة كبيرة مسجلة.</p>`}
+    </section>`;
+}
+
+function actionAnalytics(data) {
+  const retention = data.retention || {};
+  const chat = data.ai_chat || {};
+  return `
+    <section class="card compact">
+      <h2>خطة الأسبوع القادم</h2>
+      <ol class="plan">${(data.action_plan || []).slice(0, 5).map((item) => `
+        <li><b>${escapeHtml(item.action)}</b><br><small>${escapeHtml(item.evidence)}</small></li>`).join("")}</ol>
+    </section>
+    <section class="card compact two-col">
+      <div><h2>الاحتفاظ بالمعلومة</h2>
+        <p class="prose">${retention.status === "AVAILABLE" ? `الفهم المباشر ${percent(retention.immediate_mastery)}، وبعد إعادة التقييم ${percent(retention.delayed_retention)}، التغير ${retention.retention_drop_pp} نقطة مئوية.` : "لا توجد إعادة تقييم متأخرة كافية. لن يعرض التقرير نسبة احتفاظ مفترضة."}</p></div>
+      <div><h2>أسئلة المساعد</h2>
+        <p class="prose">سألت ${chat.questions_asked || 0} سؤالاً. ${chat.corroborated_confusion_topics?.length ? `تكررت أسئلة مع دليل تقييم ضعيف عن: ${chat.corroborated_confusion_topics.map((x) => x.topic).join("، ")}.` : "لا يوجد نمط ارتباك متكرر تؤيده نتائج تقييم."}</p></div>
+    </section>
+    <section class="footnote compact">
+      <p><b>كيف تقرأ التقرير:</b> التفاعل = ما حدث على المنصة. الفهم = إجابات أثناء الشرح. الإتقان = أسئلة تقييم + نقاط تحقق، مع مساهمة صغيرة للتغطية. الاحتفاظ يحتاج إعادة تقييم لاحقة.</p>
+      <p><b>نسبة الجلسة النشطة</b> = وقت تشغيل الفيديو ÷ وقت الجلسة المسجل. اختفاء الصفحة لا يثبت التشتت؛ لا نعرف ما فعله الطالب خارجها.</p>
+      <p class="thin">اتولد ${escapeHtml(new Date(data.generated_at).toLocaleString("ar-EG"))}</p>
+    </section>`;
+}
+
 
 // -------------------------
 // Load
@@ -631,14 +728,9 @@ function render(data, pending = false) {
   }
 
   sheet.innerHTML = [
-    cover(data),
-    notice,
-    pending ? waiting : summary(data),
-    story(data),
-    lectures(data),
-    topics(data),
-    pending ? "" : advice(data),
-    footnote(data),
+    `<div class="report-page">${cover(data)}${notice}${pending ? waiting : summary(data)}${overviewAnalytics(data)}</div>`,
+    `<div class="report-page"><header class="page-title"><span>٢</span><h1>ماذا تعلمت وأين تراجع</h1></header>${learningAnalytics(data)}</div>`,
+    `<div class="report-page"><header class="page-title"><span>٣</span><h1>خطتك العملية</h1></header>${actionAnalytics(data)}</div>`,
   ].join("");
 
   if (!state.reportId) {

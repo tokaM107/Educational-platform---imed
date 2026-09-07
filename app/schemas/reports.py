@@ -76,7 +76,9 @@ class TopicScore(BaseModel):
 
 
 class LectureLine(BaseModel):
-    lecture_id: int
+    lecture_id: int | None
+    video_id: int | None = None
+    source_type: str = "lecture"
     title: str
     duration_seconds: float
 
@@ -109,6 +111,8 @@ class LectureLine(BaseModel):
 
     pause_count: int
     seek_count: int
+    backward_seek_count: int = 0
+    forward_seek_count: int = 0
 
     skipped_spans: list[Span] = Field(default_factory=list)
     rewatched_spans: list[Span] = Field(default_factory=list)
@@ -145,6 +149,8 @@ class Totals(BaseModel):
 
     pause_count: int
     seek_count: int
+    backward_seek_count: int = 0
+    forward_seek_count: int = 0
     active_days: int
     week_days: int
     daily: list[DayLoad] = Field(default_factory=list)
@@ -170,6 +176,95 @@ class Narrative(BaseModel):
     weaknesses: list[str] = Field(default_factory=list)
     focus: list[FocusPoint] = Field(default_factory=list)
     advice: list[str] = Field(default_factory=list)
+
+
+class CheckpointBreakdown(BaseModel):
+    topic: str | None = None
+    lecture_id: int | str | None = None
+    lecture: str | None = None
+    shown: int
+    answered: int
+    correct: int
+    accuracy: float | None
+    completion: float | None
+    timeout_rate: float | None
+    skip_rate: float | None
+    median_response_time_seconds: float | None
+    median_allowed_time_ratio: float | None
+    first_attempt_accuracy: float | None
+
+
+class CheckpointAnalytics(CheckpointBreakdown):
+    playback_contexts: dict[str, int] = Field(default_factory=dict)
+    explanation: str
+    by_topic: list[CheckpointBreakdown] = Field(default_factory=list)
+    by_lecture: list[CheckpointBreakdown] = Field(default_factory=list)
+    by_playback_context: list[dict] = Field(default_factory=list)
+
+
+class MasteryResult(BaseModel):
+    score: float | None
+    confidence: str
+    evidence_items: int
+    components: dict = Field(default_factory=dict)
+
+
+class TopicMastery(MasteryResult):
+    topic: str
+    coverage: float | None
+    checkpoint_accuracy: float | None
+    quiz_accuracy: float | None
+
+
+class MasteryAnalytics(BaseModel):
+    overall: MasteryResult
+    topics: list[TopicMastery] = Field(default_factory=list)
+    lectures: list[dict] = Field(default_factory=list)
+
+
+class TrendPoint(BaseModel):
+    previous: float | int | None
+    current: float | int | None
+    delta: float | int | None
+
+
+class ProgressAnalytics(BaseModel):
+    status: str
+    expected_percentage: float | None
+    actual_percentage: float | None
+    gap_pp: float | None
+    assigned_items: int
+    completion_velocity_per_active_day: float | None = None
+    estimated_finish_date: date | None = None
+
+
+class ConsistencyAnalytics(BaseModel):
+    active_days: int
+    longest_inactivity_gap_days: int
+    average_sessions_per_active_day: float | None
+    last_two_days_share: float | None
+
+
+class EfficiencyAnalytics(BaseModel):
+    active_session_ratio: float | None
+    page_hidden_seconds: float
+    caution: str
+
+
+class RetentionAnalytics(BaseModel):
+    status: str
+    immediate_mastery: float | None
+    delayed_retention: float | None
+    retention_drop_pp: float | None
+    delayed_items: int
+
+
+class ActionItem(BaseModel):
+    action: str
+    evidence: str
+    lecture: int | None = None
+    video_id: int | None = None
+    timestamp: float | None = None
 
 
 class WeeklyReport(BaseModel):
@@ -209,3 +304,17 @@ class WeeklyReport(BaseModel):
     # measured number is still present.
     narrative: Narrative | None = None
     notice: str | None = None
+
+    checkpoints: CheckpointAnalytics | None = None
+    mastery: MasteryAnalytics | None = None
+    trend: dict[str, TrendPoint] = Field(default_factory=dict)
+    personal_baseline: dict[str, float | None] = Field(default_factory=dict)
+    progress: ProgressAnalytics | None = None
+    consistency: ConsistencyAnalytics | None = None
+    efficiency: EfficiencyAnalytics | None = None
+    retention: RetentionAnalytics | None = None
+    ai_chat: dict = Field(default_factory=dict)
+    action_plan: list[ActionItem] = Field(default_factory=list)
+    evidence_note: str | None = None
+    assessment_analysis: dict = Field(default_factory=dict)
+    insights: list[dict] = Field(default_factory=list)

@@ -16,6 +16,18 @@ TEACHES_SQL = """
     FROM enrollments AS e
     JOIN courses AS c ON c.id = e.course_id
     WHERE e.student_id = %s AND c.doctor_id = %s
+      AND e.status = 'active'
+      AND (e.expires_at IS NULL OR e.expires_at > now())
+    LIMIT 1
+"""
+
+TEACHES_COURSE_SQL = """
+    SELECT 1
+    FROM enrollments AS e
+    JOIN courses AS c ON c.id = e.course_id
+    WHERE e.student_id = %s AND e.course_id = %s AND c.doctor_id = %s
+      AND e.status = 'active'
+      AND (e.expires_at IS NULL OR e.expires_at > now())
     LIMIT 1
 """
 
@@ -75,3 +87,16 @@ def may_view_student(conn, current_user, student_id):
         return teaches(conn, current_user["id"], student_id)
 
     return False
+
+
+def may_view_student_course(conn, current_user, student_id, course_id):
+    """Course-specific report access; teaching another course is insufficient."""
+
+    if current_user["id"] == student_id:
+        return True
+    if current_user["role"] != "doctor" or course_id is None:
+        return False
+    return _exists(
+        conn, TEACHES_COURSE_SQL,
+        (student_id, course_id, current_user["id"]),
+    )

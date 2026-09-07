@@ -88,8 +88,10 @@ FULL_SQL = """
         (SELECT min(e.enrolled_at) FROM enrollments AS e
           WHERE e.student_id = %(student_id)s AND e.course_id = %(course_id)s)
     FROM video_events AS v
-    JOIN lectures AS l ON l.id = v.lecture_id
-    WHERE v.student_id = %(student_id)s AND l.course_id = %(course_id)s
+    LEFT JOIN lectures AS l ON l.id = v.lecture_id
+    LEFT JOIN course_items AS item ON item.id = v.video_id
+    WHERE v.student_id = %(student_id)s
+      AND COALESCE(l.course_id, item.course_id) = %(course_id)s
 """
 
 
@@ -174,6 +176,8 @@ COURSE_SQL = """
     JOIN courses AS c ON c.id = e.course_id
     JOIN users AS d ON d.id = c.doctor_id
     WHERE e.student_id = %(student_id)s
+      AND e.status = 'active'
+      AND (e.expires_at IS NULL OR e.expires_at > now())
       AND (%(course_id)s::int IS NULL OR c.id = %(course_id)s)
     ORDER BY e.enrolled_at DESC, c.id
     LIMIT 1
@@ -181,14 +185,23 @@ COURSE_SQL = """
 
 LECTURES_SQL = """
     SELECT
-        l.id,
-        l.title,
+        'lecture' AS source_type, l.id, l.id AS lecture_id,
+        NULL::integer AS video_id, l.title,
         COALESCE(MAX(c.end_ts), 0) AS duration
     FROM lectures AS l
     LEFT JOIN transcript_chunks AS c ON c.lecture_id = l.id
     WHERE l.course_id = %s
     GROUP BY l.id, l.title
-    ORDER BY l.id
+    UNION ALL
+    SELECT
+        'video' AS source_type, item.id, NULL::integer AS lecture_id,
+        item.id AS video_id, item.title,
+        COALESCE(item.duration_seconds, MAX(c.end_ts), 0) AS duration
+    FROM course_items AS item
+    LEFT JOIN transcript_chunks AS c ON c.video_id = item.id
+    WHERE item.course_id = %s AND item.type = 'video'
+    GROUP BY item.id, item.title, item.duration_seconds
+    ORDER BY source_type, id
 """
 
 ATTEMPTS_SQL = """
@@ -197,7 +210,10 @@ ATTEMPTS_SQL = """
         q.id,
         COALESCE(t.name, 'غير مصنّف') AS topic,
         a.is_correct,
-        q.difficulty
+        q.difficulty,
+        a.answered_at,
+        q.learning_objective,
+        q.cognitive_level
     FROM question_attempts AS a
     JOIN questions AS q ON q.id = a.question_id
     LEFT JOIN topics AS t ON t.id = q.topic_id
@@ -243,11 +259,15 @@ def fetch_lectures(conn, course_id):
     """The course's lectures with their lengths, in teaching order."""
 
     with conn.cursor() as cur:
-        cur.execute(LECTURES_SQL, (course_id,))
+        cur.execute(LECTURES_SQL, (course_id, course_id))
         rows = cur.fetchall()
 
     return [
-        {"id": row[0], "title": row[1], "duration": float(row[2])} for row in rows
+        {
+            "source_type": row[0], "id": row[1], "lecture_id": row[2],
+            "video_id": row[3], "title": row[4], "duration": float(row[5]),
+        }
+        for row in rows
     ]
 
 
@@ -276,6 +296,9 @@ def fetch_attempts(conn, student_id, lecture_ids, since, until):
                 "topic": row[2],
                 "is_correct": row[3],
                 "difficulty": row[4],
+                "answered_at": row[5],
+                "learning_objective": row[6],
+                "cognitive_level": row[7],
             }
             for row in cur.fetchall()
         ]
@@ -333,21 +356,22 @@ def _score(attempts):
     }
 
 
-def lecture_report(conn, student_id, lecture, window):
+def lecture_report(conn, student_id, lecture, window, events=None):
     """One lecture's line in the report."""
 
-    events = engagement.fetch_events(
-        conn,
-        student_id,
-        lecture["id"],
-        since=window.since,
-        until=window.until,
-    )
+    if events is None:
+        events = engagement.fetch_events(
+            conn,
+            student_id,
+            lecture["id"],
+            since=window.since,
+            until=window.until,
+        )
 
     totals = engagement.replay_sessions(events)
 
     duration = lecture["duration"]
-    covered = engagement.covered_seconds(totals.watched_spans)
+    covered = min(engagement.covered_seconds(totals.watched_spans), duration) if duration else 0
 
     grouped = engagement.by_session(events)
     moments = [event.created_at for event in events]
@@ -363,7 +387,9 @@ def lecture_report(conn, student_id, lecture, window):
         daily[day] += totals_for_session.watch_time_seconds
 
     return {
-        "lecture_id": lecture["id"],
+        "lecture_id": lecture["lecture_id"],
+        "video_id": lecture["video_id"],
+        "source_type": lecture["source_type"],
         "title": lecture["title"],
         "duration_seconds": duration,
         # A lecture with no transcript has no known length, so it can be
@@ -391,6 +417,8 @@ def lecture_report(conn, student_id, lecture, window):
         ),
         "pause_count": totals.pause_count,
         "seek_count": totals.seek_count,
+        "backward_seek_count": totals.backward_seek_count,
+        "forward_seek_count": totals.forward_seek_count,
         # A lecture that was never opened is entirely "unwatched", which is true
         # and useless: listing 00:00:00-01:05:00 as a gap would bury the real
         # gaps in the lectures they did watch. `opened` already says it.
@@ -464,15 +492,25 @@ def build(conn, student_id, course_id=None, week_start=None, chat_model=None,
         # answer "you are not registered for a course" is itself the finding.
         return _empty(student, window)
 
+    lecture_rows = fetch_lectures(conn, course["id"])
+    events_by_lecture = engagement.fetch_events_for_resources(
+        conn, student_id,
+        [row["lecture_id"] for row in lecture_rows if row["lecture_id"] is not None],
+        [row["video_id"] for row in lecture_rows if row["video_id"] is not None],
+        since=window.since, until=window.until,
+    )
     lectures = [
-        lecture_report(conn, student_id, lecture, window)
-        for lecture in fetch_lectures(conn, course["id"])
+        lecture_report(
+            conn, student_id, lecture, window,
+            events=events_by_lecture.get((lecture["source_type"], lecture["id"]), []),
+        )
+        for lecture in lecture_rows
     ]
 
     attempts = fetch_attempts(
         conn,
         student_id,
-        [lecture["lecture_id"] for lecture in lectures],
+        [lecture["lecture_id"] for lecture in lectures if lecture["lecture_id"] is not None],
         window.since,
         window.until,
     )
@@ -480,7 +518,7 @@ def build(conn, student_id, course_id=None, week_start=None, chat_model=None,
     by_lecture = defaultdict(list)
 
     for attempt in attempts:
-        by_lecture[attempt["lecture_id"]].append(attempt)
+        by_lecture[("lecture", attempt["lecture_id"])].append(attempt)
 
     active_days = set()
     watch_by_day = defaultdict(float)
@@ -492,7 +530,7 @@ def build(conn, student_id, course_id=None, week_start=None, chat_model=None,
         for day, seconds in lecture.pop("_daily").items():
             watch_by_day[day] += seconds
 
-        lecture_attempts = by_lecture[lecture["lecture_id"]]
+        lecture_attempts = by_lecture[(lecture["source_type"], lecture["lecture_id"] or lecture["video_id"])]
         lecture["questions"] = _score(lecture_attempts)
         lecture["weak_topics"] = sorted(
             {
@@ -532,6 +570,8 @@ def build(conn, student_id, course_id=None, week_start=None, chat_model=None,
         "time_away_rate": _rate(away, session),
         "pause_count": sum(lecture["pause_count"] for lecture in lectures),
         "seek_count": sum(lecture["seek_count"] for lecture in lectures),
+        "backward_seek_count": sum(lecture["backward_seek_count"] for lecture in lectures),
+        "forward_seek_count": sum(lecture["forward_seek_count"] for lecture in lectures),
         "active_days": len(active_days),
         "week_days": window.last_day.toordinal() - window.first_day.toordinal() + 1,
         # Every day of the week, zero-filled, so the page can draw the week as a
@@ -569,6 +609,15 @@ def build(conn, student_id, course_id=None, week_start=None, chat_model=None,
             (line["title"] for line in lectures if line["lecture_id"] == lecture_id),
             None,
         )
+
+    if kind == "weekly":
+        # Imported here to keep its pure aggregation helpers able to reuse this
+        # module's window and scoring primitives without a module import cycle.
+        from app.services import report_learning
+
+        report_learning.enrich(conn, report, window, attempts)
+        from app.services import analytics_store
+        analytics_store.put(conn, report)
 
     if with_narrative:
 
@@ -697,4 +746,27 @@ def _narrative(conn, report, window, chat_model=None, refresh=False, cache=True)
         if fallback is not None:
             return fallback["narrative"], prompts.REPORT_NARRATIVE_STALE
 
-        return None, prompts.REPORT_LLM_DOWN
+        return _fallback_narrative(report), prompts.REPORT_LLM_DOWN
+
+
+def _fallback_narrative(report):
+    """Short deterministic Arabic copy when the optional model is unavailable."""
+
+    totals = report["totals"]
+    mastery = (report.get("mastery") or {}).get("overall", {})
+    checkpoint = report.get("checkpoints") or {}
+    score = mastery.get("score")
+    score_text = "غير متاح لعدم كفاية أسئلة التقييم" if score is None else f"{score}%"
+    return {
+        "headline": "ملخص أسبوعك مبني على البيانات المسجلة فقط.",
+        "summary": (
+            f"غطيت {totals['coverage_percentage']}% من المادة المتاحة، وذاكرت في "
+            f"{totals['active_days']} أيام. دقة نقاط التحقق "
+            f"{checkpoint.get('accuracy') if checkpoint.get('accuracy') is not None else 'غير متاحة'}، "
+            f"والإتقان {score_text}."
+        ),
+        "strengths": [],
+        "weaknesses": [],
+        "focus": [],
+        "advice": [item["action"] for item in report.get("action_plan", [])[:5]],
+    }

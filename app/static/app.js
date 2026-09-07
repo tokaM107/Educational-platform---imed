@@ -196,6 +196,8 @@ async function captureEvent(eventType) {
         event_type: eventType,
         video_ts: video.currentTime,
         session_id: sessionId,
+        playback_rate: video.playbackRate,
+        client_event_id: crypto.randomUUID(),
       }),
       // The last event of a session is usually tab_hidden as the tab closes;
       // keepalive lets that request outlive the page instead of being dropped.
@@ -239,7 +241,7 @@ function startHeartbeat() {
 
     // Guard the tick as well as the listeners: a background tab throttles
     // intervals rather than stopping them, and the element can end without a
-    // pause we caught.
+  // pause we caught.
     if (video.paused || video.ended || document.visibilityState === "hidden") {
       return;
     }
@@ -422,8 +424,8 @@ video.addEventListener("pause", () => {
   stopHeartbeat();
 
   // Reaching the end fires `pause` immediately before `ended`. Recording it
-  // would count every finished lecture as one pause the student never made,
-  // and the weekly report reads pause counts as a sign of difficulty.
+  // would count every finished lecture as one pause the student never made.
+  // The report keeps pause counts as raw behavior and does not infer difficulty.
   if (video.ended) return;
 
   captureEvent("pause");
