@@ -59,6 +59,17 @@ class JobError(Exception):
     """This job cannot proceed. The message is recorded against the row."""
 
 
+class NotReadyYet(JobError):
+    """The job cannot run yet, and waiting is the correct response.
+
+    Bunny still transcoding, or a catalog row the other service has not written
+    yet. Both resolve on their own in minutes. Counting them as failed attempts
+    spends a job's three retries on waiting and leaves none for the
+    transcription, so a video queued slightly too early fails permanently for
+    no reason of its own.
+    """
+
+
 class PermanentJobError(JobError):
     """This job cannot proceed, and another attempt will not change that.
 
@@ -135,7 +146,9 @@ def media_url_for(guid):
         raise JobError(f"could not read Bunny video {guid}: {error}") from error
 
     if not bunny.is_finished(video):
-        raise JobError(f"Bunny {guid} is {bunny.status_name(video)}, not Finished")
+        raise NotReadyYet(
+            f"Bunny {guid} is {bunny.status_name(video)}, not Finished"
+        )
 
     # Unsigned on purpose. This is the URL that gets checked and logged, and
     # the signature is minted later, immediately before RunPod is called --
@@ -261,7 +274,14 @@ def run_locally(conn, job, source_url, video_id):
 
 
 def submit_next(conn):
-    """Claim one job and hand it to RunPod. True if there was one.
+    """Claim one job and hand it to RunPod. Returns its id, or None if the
+    queue had nothing to claim.
+
+    The id rather than a bare flag so the caller can tell one job being handled
+    from the same job being handled again: a job that fails and still has
+    attempts left is immediately claimable, and a loop that only knew "there
+    was one" would take it straight back and spend all three attempts in a
+    single pass, before anything had a chance to poll RunPod.
 
     With `ASR_BACKEND=cohere` there is nothing to hand anywhere: the job is
     transcribed here and finished in this call.
@@ -270,7 +290,7 @@ def submit_next(conn):
     job = transcription_jobs.claim_for_submission(conn)
 
     if job is None:
-        return False
+        return None
 
     video_id = job["video_id"]
     guid = job["bunny_guid"]
@@ -284,7 +304,7 @@ def submit_next(conn):
             video_id = resolve_video_id(conn, guid)
 
             if video_id is None:
-                raise JobError(
+                raise NotReadyYet(
                     f"no course_items video has video_ref = {guid} yet — "
                     "waiting for the catalog row"
                 )
@@ -303,7 +323,7 @@ def submit_next(conn):
                 job["max_attempts"], length,
             )
             run_locally(conn, job, bunny.sign_url(source_url), video_id)
-            return True
+            return job["id"]
 
         if backend != "runpod":
             raise JobError(
@@ -318,6 +338,17 @@ def submit_next(conn):
             bunny.sign_url(source_url), video_id=video_id
         )
 
+    except NotReadyYet as error:
+        # Back on the queue with its attempt returned, to be looked at again on
+        # a later pass.
+        transcription_jobs.defer(conn, job["id"], error)
+
+        logger.info(
+            "job=%s guid=%s deferred (attempt not spent): %s",
+            job["id"], guid, error,
+        )
+        return job["id"]
+
     except Exception as error:
         permanent = isinstance(error, PermanentJobError)
 
@@ -329,7 +360,7 @@ def submit_next(conn):
         transcription_jobs.mark_failed(
             conn, job["id"], error, permanent=permanent
         )
-        return True
+        return job["id"]
 
     transcription_jobs.mark_submitted(conn, job["id"], runpod_job_id)
 
@@ -339,7 +370,7 @@ def submit_next(conn):
         runpod_job_id, length,
     )
 
-    return True
+    return job["id"]
 
 
 # -------------------------
@@ -478,42 +509,71 @@ def settle_in_flight(conn):
 
 
 def recover_stale(conn):
-    """Release jobs whose worker died, and stop their GPU work if any."""
+    """Release jobs claimed by a worker that died before reaching RunPod.
+
+    Nothing is cancelled here any more, because nothing reaching here has a
+    RunPod job to cancel: the query only returns rows with a null
+    runpod_job_id. Rows RunPod is holding are settled by the pass above, which
+    asks RunPod what became of them rather than assuming the worst — cancelling
+    those was how a finished transcription got thrown away and re-run.
+    """
 
     released = transcription_jobs.recover_stale(conn)
 
     for job in released:
         logger.warning(
-            "job=%s guid=%s runpod_job=%s attempt=%s/%s reclaimed: "
-            "no worker reported on it",
-            job["id"], job["bunny_guid"], job["runpod_job_id"],
+            "job=%s guid=%s attempt=%s/%s reclaimed: claimed but never "
+            "submitted, and no worker has reported on it since",
+            job["id"], job["bunny_guid"],
             job["attempt_count"], job["max_attempts"],
         )
-
-        # The worker that owned this is gone, but RunPod may still be running
-        # the job it submitted. Cancelling stops GPU seconds nobody will
-        # collect the result of; the retry submits a fresh one.
-        if job["runpod_job_id"]:
-            transcribe_runpod.cancel(job["runpod_job_id"])
 
     return released
 
 
 def run_once(conn):
-    """One recovery, submit and settle pass. True if anything happened."""
+    """One reconcile, recover and submit pass. True if anything happened.
 
-    # First, so a job abandoned by a dead worker is claimable in this same
-    # pass rather than waiting for the next one.
+    Settling comes first, and that ordering is the point rather than a detail.
+
+    A job RunPod has already finished must be collected before anything in this
+    process is allowed to consider it abandoned. When submitting came first, a
+    row whose worker had been away long enough was failed, its RunPod job was
+    cancelled, and a fresh one was submitted — while the original was sitting on
+    RunPod, complete, with the transcript in it. The lecture was thrown away and
+    paid for twice, and the row's attempt counter moved for a transcription that
+    had never failed.
+
+    So: ask RunPod what happened, then recover what genuinely has nobody
+    working on it, then submit. The cost is that a newly queued lecture waits
+    one poll interval longer to reach a GPU, which is seconds against a job
+    measured in minutes.
+    """
+
+    # 1. What RunPod already knows. Completed jobs are ingested here.
+    pending = settle_in_flight(conn)
+
+    # 2. Only rows claimed and never submitted — a row with a RunPod id was
+    #    reconciled above and is not this worker's to give up on.
     released = recover_stale(conn)
 
-    worked = bool(released)
+    worked = bool(pending) or bool(released)
 
-    # Submitting before settling: a cold RunPod worker starts sooner if the
-    # job is queued before we spend time polling the ones already running.
-    while submit_next(conn):
+    # 3. New work. A job is handled at most once per pass: one that fails with
+    #    attempts left is claimable again immediately, and taking it back here
+    #    would spend every attempt before RunPod was polled once.
+    handled = set()
+
+    while True:
+        job_id = submit_next(conn)
+
+        if job_id is None or job_id in handled:
+            break
+
+        handled.add(job_id)
         worked = True
 
-    return bool(settle_in_flight(conn)) or worked
+    return worked
 
 
 def run_forever(idle_seconds=IDLE_SECONDS):

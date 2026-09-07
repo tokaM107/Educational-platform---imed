@@ -100,19 +100,33 @@ CLAIM_SQL = """
 """
 
 
-# Rows a worker claimed and then died holding. Sending them to 'failed' rather
-# than straight back to 'pending' is what keeps retry accounting in one place:
-# the attempt was already counted at claim time, so the claim query above
+# Rows a worker claimed and then died holding, *before it reached RunPod*.
+#
+# `runpod_job_id IS NULL` is the whole of the fix here. This statement used to
+# fail every stale row in flight, including ones RunPod was still working on or
+# had already finished, and the worker then cancelled the RunPod job and
+# submitted a fresh one. A lecture that had been transcribed successfully was
+# thrown away and paid for again, and the row's attempt counter moved for a
+# transcription that had never failed.
+#
+# A row that carries a RunPod id is not this worker's to give up on: RunPod
+# knows what became of it, and the settle pass asks. Only a row that was
+# claimed and never submitted has nothing to reconcile against, and that is the
+# case this recovers.
+#
+# Sending it to 'failed' rather than back to 'pending' keeps retry accounting in
+# one place: the attempt was already counted at claim time, so the claim query
 # decides whether this job has an attempt left, exactly as it does for a job
-# that failed for any other reason. A crashed worker and a rejected submission
-# are then the same case, and cannot drift apart.
+# that failed for any other reason.
 RECOVER_STALE_SQL = """
     UPDATE transcription_jobs
     SET status = %(failed)s,
         last_error = 'abandoned: no worker reported on this job for '
-                     || %(stale_minutes)s || ' minutes',
+                     || %(stale_minutes)s || ' minutes '
+                     || 'without ever reaching RunPod',
         updated_at = now()
     WHERE status = ANY(%(in_flight)s)
+      AND runpod_job_id IS NULL
       AND updated_at < now() - make_interval(mins => %(stale_minutes)s)
     RETURNING id, bunny_guid, runpod_job_id, attempt_count, max_attempts
 """
@@ -318,6 +332,46 @@ def touch(conn, job_id):
         )
 
     conn.commit()
+
+
+# Not ready yet, which is not the same as failed.
+#
+# A video Bunny is still transcoding, or one whose catalog row the other service
+# has not written, will be fine on its own in a few minutes. Counting those as
+# attempts spends a job's three retries on waiting and leaves none for the
+# transcription itself — the video is then permanently failed for having been
+# queued slightly too early.
+#
+# The attempt taken at claim time is given back, so a deferral leaves the row
+# exactly as the claim found it.
+DEFER_SQL = """
+    UPDATE transcription_jobs
+    SET status = %(pending)s,
+        attempt_count = GREATEST(attempt_count - 1, 0),
+        runpod_job_id = NULL,
+        started_at = NULL,
+        last_error = %(reason)s,
+        updated_at = now()
+    WHERE id = %(job_id)s
+    RETURNING attempt_count
+"""
+
+
+def defer(conn, job_id, reason):
+    """Put a claimed job back on the queue without spending an attempt."""
+
+    with conn.cursor() as cur:
+
+        cur.execute(DEFER_SQL, {
+            "pending": PENDING,
+            "reason": str(reason)[:2000],
+            "job_id": job_id,
+        })
+        row = cur.fetchone()
+
+    conn.commit()
+
+    return row[0] if row else None
 
 
 def mark_completed(conn, job_id, chunk_count, metrics=None):

@@ -94,7 +94,7 @@ def record_marks(monkeypatch):
     marks = Marks()
 
     for name in ("mark_submitted", "mark_failed", "mark_completed",
-                 "mark_processing", "touch"):
+                 "mark_processing", "touch", "defer"):
         monkeypatch.setattr(
             transcription_jobs, name,
             lambda conn, *args, _name=name, **kwargs: marks.record(
@@ -120,7 +120,7 @@ def test_a_claimed_job_is_submitted_and_its_runpod_id_recorded(
                         lambda conn: next(claims, None))
     marks = record_marks(monkeypatch)
 
-    assert worker.submit_next(FakeConn()) is True
+    assert worker.submit_next(FakeConn()) is not None
     assert no_network["submitted"] == ["https://cdn.example/guid-1/play_240p.mp4"]
     assert ("mark_submitted", (1, "rp-1")) in marks
 
@@ -141,10 +141,12 @@ def test_the_worker_never_fetches_the_media_itself(monkeypatch, no_network):
                         lambda conn: next(claims, None))
     record_marks(monkeypatch)
 
-    assert worker.submit_next(FakeConn()) is True
+    assert worker.submit_next(FakeConn()) is not None
 
 
 def test_a_video_bunny_has_not_finished_is_not_submitted(monkeypatch, no_network):
+    """And waiting for it must not cost the job one of its three attempts."""
+
     monkeypatch.setattr(worker.bunny, "get_video",
                         lambda guid: {"guid": guid, "status": 3})
     claims = iter([a_job(runpod_job_id=None)])
@@ -152,10 +154,12 @@ def test_a_video_bunny_has_not_finished_is_not_submitted(monkeypatch, no_network
                         lambda conn: next(claims, None))
     marks = record_marks(monkeypatch)
 
-    worker.submit_next(FakeConn())
-
+    assert worker.submit_next(FakeConn()) is not None
     assert no_network["submitted"] == []
-    assert [name for name, _ in marks] == ["mark_failed"]
+
+    # Deferred, not failed: Bunny will finish encoding on its own, and a job
+    # queued a minute early must not burn its retries waiting for that.
+    assert [name for name, _ in marks] == ["defer"]
 
 
 def test_a_non_bunny_url_is_refused_before_a_gpu_is_started(
@@ -180,27 +184,23 @@ def test_an_empty_queue_submits_nothing(monkeypatch):
     monkeypatch.setattr(transcription_jobs, "claim_for_submission",
                         lambda conn: None)
 
-    assert worker.submit_next(FakeConn()) is False
+    assert worker.submit_next(FakeConn()) is None
 
 
 def test_a_job_queued_before_the_catalog_row_waits(monkeypatch, no_network):
-    """Bunny can finish encoding before Nest writes video_ref."""
+    """Nest writes video_ref on its own schedule; that is waiting, not failing."""
 
-    claims = iter([a_job(video_id=None, runpod_job_id=None)])
+    monkeypatch.setattr(worker, "resolve_video_id", lambda conn, guid: None)
+    claims = iter([a_job(runpod_job_id=None, video_id=None)])
     monkeypatch.setattr(transcription_jobs, "claim_for_submission",
                         lambda conn: next(claims, None))
     marks = record_marks(monkeypatch)
 
-    worker.submit_next(FakeConn())
-
+    assert worker.submit_next(FakeConn()) is not None
     assert no_network["submitted"] == []
-    assert marks[0][0] == "mark_failed"
+
+    assert [name for name, _ in marks] == ["defer"]
     assert "waiting for the catalog row" in str(marks[0][1][1])
-
-
-# -------------------------
-# Settling: the money branch
-# -------------------------
 
 
 def test_an_unreachable_runpod_leaves_the_job_in_flight(monkeypatch, no_network):
@@ -436,17 +436,22 @@ def test_a_reclaimed_job_goes_to_failed_so_retry_accounting_stays_in_one_place()
     assert "SET status = %(failed)s" in transcription_jobs.RECOVER_STALE_SQL
 
 
-def test_recovering_cancels_the_runpod_job_it_abandoned(monkeypatch, no_network):
-    """The old worker is gone but RunPod may still be burning GPU seconds."""
+def test_recovery_never_cancels_a_runpod_job(monkeypatch, no_network):
+    """It used to, and that is how a finished transcription was thrown away.
+
+    Recovery cannot tell a dead job from a running or finished one — only
+    RunPod can, and the settle pass asks. Cancelling on a guess destroyed
+    completed work and paid for it again.
+    """
 
     monkeypatch.setattr(
         transcription_jobs, "recover_stale",
-        lambda conn: [{"id": 5, "bunny_guid": "g", "runpod_job_id": "rp-9",
+        lambda conn: [{"id": 5, "bunny_guid": "g", "runpod_job_id": None,
                        "attempt_count": 2, "max_attempts": 3}],
     )
 
     assert worker.recover_stale(FakeConn())
-    assert no_network["cancelled"] == ["rp-9"]
+    assert no_network["cancelled"] == []
 
 
 def test_recovering_a_job_that_never_reached_runpod_cancels_nothing(
@@ -518,7 +523,7 @@ def test_the_cohere_backend_never_calls_runpod(monkeypatch, no_network):
     )
     marks = record_marks(monkeypatch)
 
-    assert worker.submit_next(FakeConn()) is True
+    assert worker.submit_next(FakeConn()) is not None
     assert no_network["submitted"] == []
     assert no_network["ingested"] == [11]
 
