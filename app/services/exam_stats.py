@@ -1,513 +1,501 @@
-"""Post-exam statistics for the instructor.
+"""Deterministic teacher assessment analytics over persisted exam evidence.
 
-An "exam" here is the question set attached to one lecture — the same set whose
-completion fires the exam report. This module answers the questions a lecturer
-asks the morning after: how did the class do, which question did they fall over,
-and which topic needs saying again.
-
-Deterministic on purpose. Every figure is a GROUP BY over `question_attempts`
-joined to `questions`; nothing is generated, nothing is interpreted, and the same
-data always produces the same page. A written commentary can be layered on later
-if the numbers turn out not to speak for themselves — but they usually do, and an
-unnecessary model call would make a page that currently answers in milliseconds
-take half a minute and cost quota.
-
-Two definitions worth stating, because "score" is ambiguous:
-
-    score      distinct questions answered correctly / questions in the exam.
-               Unanswered counts as wrong, which is what a mark out of ten means.
-    accuracy   distinct questions correct / distinct questions attempted.
-               Fair to someone who only answered half, and the right number for
-               judging a question rather than a student.
-
-A question counts as correct for a student if any of their attempts was correct,
-matching the convention the weekly report already uses; `first_attempt_percent`
-keeps the stricter reading available beside it.
-
-**Distractor analysis.** `question_attempts.selected_option` records the choice
-itself, so the view can say *which* wrong answer the class went for. That is the
-difference between "38% got it wrong" — which might just be a hard question — and
-"34% of them chose C", which says that one distractor is teaching something false
-or the stem is ambiguous. Attempts recorded before that column existed have no
-choice to report, so every distribution carries the count it was built from and
-never passes off a partial picture as a complete one.
-
-**This endpoint exposes correct answers.** A distractor table is unreadable
-without marking which option was right, so `/api/exams/*` hands out the answer
-key. It is an instructor view and must sit behind authentication before launch —
-today nothing stops a student calling it.
+Score is final correct responses / all exam questions (unanswered is wrong).
+Attempted accuracy is final correct responses / answered questions. Item
+discrimination is point-biserial correlation against the other-item score.
 """
 
-import logging
-from statistics import mean, median
+from __future__ import annotations
 
+import logging
+import math
+from collections import defaultdict
+from dataclasses import dataclass
+from statistics import mean, median
 
 logger = logging.getLogger(__name__)
 
 
-# Anything at or above this is a pass. Instructors differ, so it is a parameter
-# rather than a constant buried in a query.
-DEFAULT_PASS_MARK = 60.0
+@dataclass(frozen=True)
+class AnalyticsConfig:
+    pass_mark: float = 60.0
+    easy_at: float = 80.0
+    moderate_at: float = 50.0
+    min_discrimination_students: int = 10
+    good_discrimination_at: float = 0.20
+    non_functioning_distractor_below: float = 5.0
+    misconception_distractor_at: float = 25.0
+    suspicious_high_performer_gap: float = 20.0
+    min_group_students: int = 5
+    min_topic_questions: int = 2
+    min_topic_attempts: int = 10
+    mastery_threshold: float = 60.0
+    high_confidence_students: int = 30
+    medium_confidence_students: int = 10
+    high_confidence_attempts: int = 60
+    medium_confidence_attempts: int = 20
+    priority_high_at: float = 50.0
+    priority_medium_at: float = 25.0
+    strong_score_at: float = 85.0
+    high_retry_dependency_at: float = 50.0
 
-# Below this many answers a percentage is a coin toss, not a finding. Used to
-# mark a question or topic as unreliable rather than to hide it.
-MIN_ANSWERS = 3
 
-# A question labelled 'hard' that nearly everyone gets right — or 'easy' that
-# nearly everyone misses — is a labelling problem worth surfacing.
-EASY_IF_ABOVE = 85.0
-HARD_IF_BELOW = 50.0
+DEFAULT_CONFIG = AnalyticsConfig()
+DEFAULT_PASS_MARK = DEFAULT_CONFIG.pass_mark
 
-
-LECTURE_SQL = """
-    SELECT l.id, l.title, l.course_id, c.title, d.name
-    FROM lectures AS l
-    LEFT JOIN courses AS c ON c.id = l.course_id
-    LEFT JOIN users AS d ON d.id = l.doctor_id
-    WHERE l.id = %s
+EXAM_SQL = """
+SELECT e.id,e.title,e.course_id,c.title,d.name,e.pass_score
+FROM exams e JOIN courses c ON c.id=e.course_id JOIN users d ON d.id=c.doctor_id
+WHERE e.id=%s
 """
-
-# The class: whoever is enrolled on the course the lecture belongs to. Attempts
-# by anyone else are excluded from every figure and counted separately, so a
-# stray row never silently moves an average.
 COHORT_SQL = """
-    SELECT e.student_id
-    FROM enrollments AS e
-    WHERE e.course_id = %s
+SELECT u.id,u.name,u.email FROM enrollments en JOIN users u ON u.id=en.student_id
+WHERE en.course_id=%s AND en.status='active'
+AND (en.expires_at IS NULL OR en.expires_at>now()) ORDER BY u.name,u.id
 """
-
-# One row per attempt, numbered per student per question so the first try can be
-# told from the retries.
-TRIES_CTE = """
-    WITH tries AS (
-        SELECT
-            a.question_id,
-            a.student_id,
-            a.is_correct,
-            row_number() OVER (
-                PARTITION BY a.student_id, a.question_id
-                ORDER BY a.answered_at, a.id
-            ) AS try_number
-        FROM question_attempts AS a
-        JOIN questions AS q ON q.id = a.question_id
-        WHERE q.lecture_id = %(lecture_id)s
-          AND (%(cohort)s::int[] IS NULL OR a.student_id = ANY(%(cohort)s))
-    )
+QUESTIONS_SQL = """
+SELECT q.id,q.text,q.type,q.points,q.order_index,
+       COALESCE(t.name,q.topic,'Uncategorised'),q.learning_objective,q.difficulty,
+       o.id,o.text,o.is_correct,o.order_index
+FROM exam_questions q LEFT JOIN topics t ON t.id=q.topic_id
+LEFT JOIN exam_options o ON o.question_id=q.id WHERE q.exam_id=%s
+ORDER BY q.order_index,q.id,o.order_index,o.id
 """
-
-QUESTIONS_SQL = TRIES_CTE + """
-    SELECT
-        q.id,
-        q.stem,
-        q.difficulty,
-        COALESCE(t.name, 'Uncategorised') AS topic,
-        count(DISTINCT tr.student_id) AS students,
-        count(tr.question_id) AS attempts,
-        count(DISTINCT tr.student_id) FILTER (WHERE tr.is_correct) AS students_correct,
-        count(*) FILTER (WHERE tr.try_number = 1) AS first_tries,
-        count(*) FILTER (WHERE tr.try_number = 1 AND tr.is_correct) AS first_correct
-    FROM questions AS q
-    LEFT JOIN topics AS t ON t.id = q.topic_id
-    LEFT JOIN tries AS tr ON tr.question_id = q.id
-    WHERE q.lecture_id = %(lecture_id)s
-    GROUP BY q.id, q.stem, q.difficulty, t.name
-    ORDER BY q.id
+SITTINGS_SQL = """
+SELECT id,user_id,status,attempt_number,started_at,submitted_at,score,max_score,
+       awarded_points,submission_reason FROM exam_attempts
+WHERE exam_id=%(exam_id)s AND user_id=ANY(%(cohort)s)
+ORDER BY user_id,attempt_number,started_at,id
 """
-
-TOPICS_SQL = TRIES_CTE + """
-    SELECT
-        COALESCE(t.name, 'Uncategorised') AS topic,
-        count(DISTINCT q.id) AS questions,
-        count(DISTINCT tr.student_id) AS students,
-        count(tr.question_id) AS attempts,
-        count(*) FILTER (WHERE tr.is_correct) AS correct_attempts
-    FROM questions AS q
-    LEFT JOIN topics AS t ON t.id = q.topic_id
-    LEFT JOIN tries AS tr ON tr.question_id = q.id
-    WHERE q.lecture_id = %(lecture_id)s
-    GROUP BY t.name
-    ORDER BY t.name
+RESPONSES_SQL = """
+SELECT r.id,r.exam_attempt_id,r.exam_question_id,r.student_id,r.attempt_number,
+       r.selected_option_ids,r.is_correct,r.shown_at,r.answered_at,
+       r.response_time_ms,r.skipped,r.timed_out,a.attempt_number
+FROM assessment_question_attempts r JOIN exam_attempts a ON a.id=r.exam_attempt_id
+JOIN exam_questions q ON q.id=r.exam_question_id
+WHERE q.exam_id=%(exam_id)s AND r.student_id=ANY(%(cohort)s)
+ORDER BY r.student_id,q.order_index,a.attempt_number,r.attempt_number,r.shown_at,r.id
 """
-
-# What the class actually picked, per question. Restricted to attempts that have
-# a recorded choice — the column is younger than some of the rows.
-OPTIONS_SQL = TRIES_CTE.replace(
-    "a.is_correct,", "a.is_correct, a.selected_option,"
-) + """
-    SELECT
-        q.id,
-        upper(trim(tr.selected_option)) AS chosen,
-        count(*) AS picks,
-        count(*) FILTER (WHERE tr.try_number = 1) AS first_picks
-    FROM questions AS q
-    JOIN tries AS tr ON tr.question_id = q.id
-    WHERE q.lecture_id = %(lecture_id)s
-      AND tr.selected_option IS NOT NULL
-    GROUP BY q.id, upper(trim(tr.selected_option))
-    ORDER BY q.id, picks DESC
-"""
-
-# The answer key, and the option text to label the distribution with.
-ANSWERS_SQL = """
-    SELECT id, correct_option, options
-    FROM questions
-    WHERE lecture_id = %s
-"""
-
-ROSTER_SQL = TRIES_CTE + """
-    SELECT
-        u.id,
-        u.name,
-        u.email,
-        count(DISTINCT tr.question_id) AS answered,
-        count(DISTINCT tr.question_id) FILTER (WHERE tr.is_correct) AS correct,
-        count(tr.question_id) AS attempts
-    FROM users AS u
-    JOIN tries AS tr ON tr.student_id = u.id
-    GROUP BY u.id, u.name, u.email
-    ORDER BY u.name
-"""
-
 OUTSIDERS_SQL = """
-    SELECT count(*)
-    FROM question_attempts AS a
-    JOIN questions AS q ON q.id = a.question_id
-    WHERE q.lecture_id = %(lecture_id)s
-      AND (%(cohort)s::int[] IS NOT NULL AND NOT (a.student_id = ANY(%(cohort)s)))
+SELECT count(*) FROM assessment_question_attempts r
+JOIN exam_questions q ON q.id=r.exam_question_id
+WHERE q.exam_id=%(exam_id)s AND NOT (r.student_id=ANY(%(cohort)s))
+"""
+LIST_SQL = """
+SELECT e.id,e.title,e.course_id,c.title,count(DISTINCT q.id),
+       count(DISTINCT a.user_id),count(a.id),max(a.submitted_at)
+FROM exams e JOIN courses c ON c.id=e.course_id
+LEFT JOIN exam_questions q ON q.exam_id=e.id LEFT JOIN exam_attempts a ON a.exam_id=e.id
+WHERE c.doctor_id=%(doctor_id)s
+AND (%(course_id)s::int IS NULL OR e.course_id=%(course_id)s)
+GROUP BY e.id,e.title,e.course_id,c.title
+ORDER BY max(a.submitted_at) DESC NULLS LAST,e.id
 """
 
 
 def _percent(part, whole):
-    """None when there is no denominator — different from zero, printed so."""
+    return None if not whole else round(part / whole * 100, 1)
 
-    if not whole:
+
+def _percentile(values, p):
+    if not values:
         return None
+    ordered = sorted(float(v) for v in values)
+    pos = (len(ordered) - 1) * p
+    lo, hi = math.floor(pos), math.ceil(pos)
+    value = ordered[lo] if lo == hi else ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo)
+    return round(value, 1)
 
-    return round(part / whole * 100, 1)
 
-
-def _calibration(difficulty, correct_percent):
-    """Whether the label on a question matches how the class actually found it."""
-
-    if correct_percent is None or not difficulty:
-        return None
-
-    label = difficulty.strip().lower()
-
-    if label == "hard" and correct_percent >= EASY_IF_ABOVE:
-        return "easier_than_labelled"
-
-    if label == "easy" and correct_percent < HARD_IF_BELOW:
-        return "harder_than_labelled"
-
-    return "as_labelled"
+def _stats(values, scale=1.0):
+    values = [float(v) / scale for v in values if v is not None]
+    return {"mean": round(mean(values), 1) if values else None,
+            "median": round(median(values), 1) if values else None,
+            "p25": _percentile(values, .25), "p75": _percentile(values, .75),
+            "sample_size": len(values)}
 
 
 def _distribution(scores):
-    """Fifths of the mark range, so the shape of the cohort is visible."""
-
-    edges = [(0, 20), (20, 40), (40, 60), (60, 80), (80, 100)]
-    buckets = []
-
-    for low, high in edges:
-
-        if high == 100:
-            count = sum(1 for score in scores if low <= score <= high)
-        else:
-            count = sum(1 for score in scores if low <= score < high)
-
-        buckets.append({"low": low, "high": high, "students": count})
-
-    return buckets
+    result = []
+    for low, high in ((0, 20), (20, 40), (40, 60), (60, 80), (80, 100)):
+        count = sum(low <= s <= high if high == 100 else low <= s < high for s in scores)
+        result.append({"low": low, "high": high, "students": count})
+    return result
 
 
-# A wrong option this many percent of the class chose is not a spread of guesses;
-# it is one specific misconception worth a minute of the next lecture.
-DOMINANT_DISTRACTOR = 25.0
-
-
-def _option_letter(text):
-    """"C) Pneumatic bone" -> "C". Options are stored already lettered."""
-
-    label = (text or "").strip()
-
-    if len(label) >= 2 and label[0].isalnum() and label[1] in ").:-":
-        return label[0].upper()
-
-    return None
-
-
-def _distractors(picks, correct_option, options):
-    """One row per option offered, with how many chose it.
-
-    Every option is listed even when nobody picked it: a distractor nobody
-    touches is itself a finding — the question is really a three-way choice.
-    """
-
-    total = sum(count for _, count, _ in picks)
-    by_letter = {letter: (count, first) for letter, count, first in picks}
-
-    correct = (correct_option or "").strip().upper()
-    rows = []
-
-    for text in options or []:
-
-        letter = _option_letter(text)
-
-        if letter is None:
-            continue
-
-        count, first = by_letter.pop(letter, (0, 0))
-
-        rows.append({
-            "option": letter,
-            "text": text,
-            "is_correct": letter == correct,
-            "picks": count,
-            "first_picks": first,
-            "percent": _percent(count, total),
-        })
-
-    # A recorded choice that matches no option on the question — a renumbered
-    # question, or a client sending something unexpected. Shown, not dropped.
-    for letter, (count, first) in sorted(by_letter.items()):
-        rows.append({
-            "option": letter,
-            "text": None,
-            "is_correct": letter == correct,
-            "picks": count,
-            "first_picks": first,
-            "percent": _percent(count, total),
-        })
-
-    return rows, total
-
-
-def _top_distractor(distribution):
-    """The wrong option the class went for, if one of them dominates."""
-
-    wrong = [row for row in distribution if not row["is_correct"] and row["picks"]]
-
-    if not wrong:
+def _difficulty(value, config=DEFAULT_CONFIG):
+    if value is None:
         return None
+    return "easy" if value >= config.easy_at else "moderate" if value >= config.moderate_at else "difficult"
 
-    worst = max(wrong, key=lambda row: row["picks"])
 
-    if (worst["percent"] or 0) < DOMINANT_DISTRACTOR:
+def _confidence(students, attempts, questions=1, config=DEFAULT_CONFIG):
+    if students >= config.high_confidence_students and attempts >= config.high_confidence_attempts:
+        return "HIGH"
+    if students >= config.medium_confidence_students and attempts >= config.medium_confidence_attempts:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _correlation(xs, ys):
+    if len(xs) != len(ys) or len(xs) < 2:
         return None
+    mx, my = mean(xs), mean(ys)
+    numerator = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    dx, dy = sum((x - mx) ** 2 for x in xs), sum((y - my) ** 2 for y in ys)
+    return None if not dx or not dy else round(numerator / math.sqrt(dx * dy), 3)
 
-    return {"option": worst["option"], "text": worst["text"],
-            "percent": worst["percent"], "picks": worst["picks"]}
+
+def _discrimination(item_results, all_results, question_id, total_questions,
+                    config=DEFAULT_CONFIG):
+    students = sorted(item_results)
+    if len(students) < config.min_discrimination_students or total_questions < 2:
+        return None, "insufficient_data", len(students)
+    xs, ys = [], []
+    for sid in students:
+        other = [correct for (student, qid), correct in all_results.items()
+                 if student == sid and qid != question_id]
+        xs.append(float(item_results[sid]))
+        ys.append(sum(other) / (total_questions - 1))
+    value = _correlation(xs, ys)
+    if value is None:
+        return None, "insufficient_variance", len(students)
+    return value, ("negative" if value < 0 else
+                   "weak" if value < config.good_discrimination_at else "good"), len(students)
 
 
-def fetch(conn, lecture_id, pass_mark=DEFAULT_PASS_MARK):
-    """Everything the instructor view shows, or None if the lecture is unknown."""
+def _priority(accuracy, discrimination, options, retry_rate, skip_rate,
+              response_median, exam_p75, config=DEFAULT_CONFIG):
+    score, reasons = 0.0, []
+    if accuracy is not None:
+        score += (100 - accuracy) * .35
+        if accuracy < config.moderate_at:
+            reasons.append(f"{accuracy:.1f}% correct")
+    if discrimination == "negative":
+        score += 25
+        reasons.append("negative discrimination; review recommended")
+    elif discrimination == "weak":
+        score += 12
+        reasons.append("weak discrimination")
+    misconception = next((o for o in options if o["classification"] == "strong_misconception"), None)
+    suspicious = next((o for o in options if o["classification"] == "suspicious"), None)
+    if misconception:
+        score += 15
+        reasons.append(f"{misconception['percent']:.1f}% selected distractor {misconception['order']}")
+    if suspicious:
+        score += 10
+        reasons.append(f"distractor {suspicious['order']} over-selected by higher performers")
+    if retry_rate is not None:
+        score += retry_rate * .15
+        if retry_rate >= 25:
+            reasons.append(f"{retry_rate:.1f}% required retry")
+    if skip_rate is not None:
+        score += skip_rate * .15
+        if skip_rate >= 10:
+            reasons.append(f"{skip_rate:.1f}% skipped/timed out")
+    if response_median is not None and exam_p75 is not None and response_median > exam_p75:
+        score += 10
+        reasons.append("response time above exam p75")
+    score = round(min(score, 100), 1)
+    category = "HIGH" if score >= config.priority_high_at else "MEDIUM" if score >= config.priority_medium_at else "LOW"
+    return score, category, reasons
 
+
+def _support(completed, score, accuracy, first_accuracy, retry_rate, weak_topics,
+             config=DEFAULT_CONFIG):
+    if not completed:
+        return "INCOMPLETE_OR_INSUFFICIENT", "Low completion"
+    if accuracy is None or first_accuracy is None or score is None:
+        return "INCOMPLETE_OR_INSUFFICIENT", "Insufficient question-level evidence"
+    if weak_topics:
+        return "NEEDS_SUPPORT", f"Weak topic: {weak_topics[0]}"
+    if retry_rate is not None and retry_rate >= config.high_retry_dependency_at:
+        return "NEEDS_SUPPORT", "High retry dependency"
+    if accuracy < config.mastery_threshold:
+        return "NEEDS_SUPPORT", "Low attempted accuracy"
+    if first_accuracy < config.moderate_at:
+        return "NEEDS_SUPPORT", "Low first-attempt knowledge"
+    if score >= config.strong_score_at and accuracy >= 80 and (retry_rate or 0) < 25:
+        return "STRONG_PERFORMANCE", "Secure first-attempt performance"
+    return "ON_TRACK", "No immediate concern"
+
+
+def _shape_questions(rows):
+    questions, by_id = [], {}
+    for row in rows:
+        if row[0] not in by_id:
+            item = {"question_id": row[0], "stem": row[1], "type": row[2],
+                    "points": row[3], "order": row[4], "topic": row[5],
+                    "learning_objective": row[6], "declared_difficulty": row[7],
+                    "options": []}
+            by_id[row[0]] = item
+            questions.append(item)
+        if row[8] is not None:
+            by_id[row[0]]["options"].append({"option_id": row[8], "text": row[9],
+                                             "is_correct": row[10], "order": row[11]})
+    return questions
+
+
+def fetch(conn, exam_id, pass_mark=None, config=DEFAULT_CONFIG):
+    """Build one report using a bounded set of bulk queries (no N+1 reads)."""
     with conn.cursor() as cur:
-
-        cur.execute(LECTURE_SQL, (lecture_id,))
-        lecture = cur.fetchone()
-
-        if lecture is None:
+        cur.execute(EXAM_SQL, (exam_id,))
+        exam = cur.fetchone()
+        if exam is None:
             return None
+        cur.execute(COHORT_SQL, (exam[2],))
+        cohort = cur.fetchall()
+        cohort_ids = [r[0] for r in cohort]
+        cur.execute(QUESTIONS_SQL, (exam_id,))
+        questions = _shape_questions(cur.fetchall())
+        if cohort_ids:
+            params = {"exam_id": exam_id, "cohort": cohort_ids}
+            cur.execute(SITTINGS_SQL, params)
+            sitting_rows = cur.fetchall()
+            cur.execute(RESPONSES_SQL, params)
+            response_rows = cur.fetchall()
+            cur.execute(OUTSIDERS_SQL, params)
+            outsiders = cur.fetchone()[0]
+        else:
+            sitting_rows, response_rows, outsiders = [], [], 0
 
-        _, title, course_id, course_title, doctor_name = lecture
+    pass_mark = float(exam[5] if pass_mark is None else pass_mark)
+    qids = {q["question_id"] for q in questions}
+    sittings, responses = defaultdict(list), defaultdict(list)
+    for r in sitting_rows:
+        sittings[r[1]].append({"id": r[0], "status": r[2], "attempt_number": r[3],
+                               "started_at": r[4], "submitted_at": r[5], "score": r[6],
+                               "max_score": r[7], "awarded_points": r[8],
+                               "submission_reason": r[9]})
+    for r in response_rows:
+        responses[(r[3], r[2])].append({"id": r[0], "exam_attempt_id": r[1],
+            "question_id": r[2], "student_id": r[3], "attempt_number": r[4],
+            "selected_option_ids": list(r[5]) if r[5] is not None else None,
+            "is_correct": r[6], "shown_at": r[7], "answered_at": r[8],
+            "response_time_ms": r[9], "skipped": r[10], "timed_out": r[11],
+            "exam_attempt_number": r[12]})
+    first = {key: value[0] for key, value in responses.items()}
+    final = {key: value[-1] for key, value in responses.items()}
+    final_correct = {key: bool(value["is_correct"]) for key, value in final.items()
+                     if value["answered_at"] is not None}
+    all_times = [e["response_time_ms"] for values in responses.values() for e in values
+                 if e["response_time_ms"] is not None]
+    response_time = _stats(all_times, 1000)
 
-        cohort = None
+    students, student_scores = [], {}
+    student_topics = defaultdict(lambda: defaultdict(list))
+    topic_by_qid = {q["question_id"]: q["topic"] for q in questions}
+    for sid, name, email in cohort:
+        student_sittings = sittings.get(sid, [])
+        terminal = [s for s in student_sittings if s["status"] in ("submitted", "expired")]
+        latest = terminal[-1] if terminal else (student_sittings[-1] if student_sittings else None)
+        detailed = [(qid, final[(sid, qid)]) for qid in qids if (sid, qid) in final]
+        answered = [(qid, e) for qid, e in detailed if e["answered_at"] is not None]
+        correct = sum(bool(e["is_correct"]) for _, e in answered)
+        initial = [first[(sid, qid)] for qid, _ in detailed
+                   if first[(sid, qid)]["answered_at"] is not None]
+        retries = sum(max(len(responses[(sid, qid)]) - 1, 0) for qid, _ in detailed)
+        retried = sum(len(responses[(sid, qid)]) > 1 for qid, _ in detailed)
+        if detailed and qids:
+            score = _percent(correct, len(qids))
+        elif latest and latest["awarded_points"] is not None and latest["max_score"]:
+            score = _percent(latest["awarded_points"], latest["max_score"])
+        elif latest and latest["score"] is not None:
+            score = float(latest["score"])
+        else:
+            score = None
+        accuracy = _percent(correct, len(answered))
+        first_accuracy = _percent(sum(bool(e["is_correct"]) for e in initial), len(initial))
+        retry_rate = _percent(retried, len(detailed))
+        for qid, event in answered:
+            student_topics[sid][topic_by_qid[qid]].append(bool(event["is_correct"]))
+        durations = [(s["submitted_at"] - s["started_at"]).total_seconds() for s in terminal
+                     if s["submitted_at"] and s["started_at"]]
+        student_scores[sid] = score
+        students.append({"student_id": sid, "name": name, "email": email,
+            "started": bool(student_sittings),
+            "completed": any(s["status"] == "submitted" for s in student_sittings),
+            "questions_answered": len(answered), "questions_correct": correct,
+            "score_percent": score, "attempted_accuracy": accuracy,
+            "first_attempt_accuracy": first_accuracy, "retries": retries,
+            "retry_rate": retry_rate, "exam_attempts": len(student_sittings),
+            "duration_seconds": round(durations[-1], 1) if durations else None})
 
-        if course_id is not None:
-            cur.execute(COHORT_SQL, (course_id,))
-            cohort = [row[0] for row in cur.fetchall()]
+    score_values = [v for v in student_scores.values() if v is not None]
+    score_median = median(score_values) if score_values else None
+    high = {sid for sid, score in student_scores.items() if score_median is not None and score is not None and score > score_median}
+    low = {sid for sid, score in student_scores.items() if score_median is not None and score is not None and score < score_median}
+    question_stats, difficulty_counts = [], {"easy": 0, "moderate": 0, "difficult": 0}
+    topic_qids, topic_students, topic_attempts = defaultdict(set), defaultdict(set), defaultdict(int)
+    for question in questions:
+        qid = question["question_id"]
+        shown = {sid: e for (sid, item), e in final.items() if item == qid}
+        answered = {sid: e for sid, e in shown.items() if e["answered_at"] is not None}
+        initial = {sid: e for (sid, item), e in first.items() if item == qid and e["answered_at"] is not None}
+        accuracy = _percent(sum(bool(e["is_correct"]) for e in answered.values()), len(answered))
+        first_accuracy = _percent(sum(bool(e["is_correct"]) for e in initial.values()), len(initial))
+        attempts = sum(len(responses[(sid, qid)]) for sid in shown)
+        retry_rate = _percent(sum(len(responses[(sid, qid)]) > 1 for sid in shown), len(shown))
+        skip_rate = _percent(sum(e["skipped"] or e["timed_out"] for e in shown.values()), len(shown))
+        q_times = [e["response_time_ms"] for e in answered.values() if e["response_time_ms"] is not None]
+        correct_times = [e["response_time_ms"] for e in answered.values() if e["is_correct"] and e["response_time_ms"] is not None]
+        wrong_times = [e["response_time_ms"] for e in answered.values() if not e["is_correct"] and e["response_time_ms"] is not None]
+        initial_times = [e["response_time_ms"] for e in initial.values() if e["response_time_ms"] is not None]
+        timing = _stats(q_times, 1000)
+        timing.update({"correct_median": _stats(correct_times, 1000)["median"],
+                       "incorrect_median": _stats(wrong_times, 1000)["median"],
+                       "first_attempt_median": _stats(initial_times, 1000)["median"]})
+        discr, discr_label, discr_n = _discrimination(
+            {sid: bool(e["is_correct"]) for sid, e in answered.items()}, final_correct,
+            qid, len(qids), config)
+        option_rows = []
+        for option in question["options"]:
+            selected = {sid for sid, e in answered.items()
+                        if option["option_id"] in (e["selected_option_ids"] or [])}
+            pct = _percent(len(selected), len(answered))
+            high_pct, low_pct = _percent(len(selected & high), len(high)), _percent(len(selected & low), len(low))
+            classification = "correct" if option["is_correct"] else "functioning"
+            if not option["is_correct"]:
+                if (pct or 0) < config.non_functioning_distractor_below:
+                    classification = "non_functioning"
+                if (pct or 0) >= config.misconception_distractor_at:
+                    classification = "strong_misconception"
+                if (len(high) >= config.min_group_students and len(low) >= config.min_group_students
+                        and high_pct is not None and low_pct is not None
+                        and high_pct - low_pct >= config.suspicious_high_performer_gap):
+                    classification = "suspicious"
+            option_rows.append({**option, "picks": len(selected), "percent": pct,
+                "high_performer_percent": high_pct, "low_performer_percent": low_pct,
+                "classification": classification})
+        priority_score, priority, reasons = _priority(accuracy, discr_label, option_rows,
+            retry_rate, skip_rate, timing["median"], response_time["p75"], config)
+        empirical = _difficulty(accuracy, config)
+        if empirical:
+            difficulty_counts[empirical] += 1
+        topic_qids[question["topic"]].add(qid)
+        topic_students[question["topic"]].update(shown)
+        topic_attempts[question["topic"]] += attempts
+        question_stats.append({**question, "students_answered": len(answered),
+            "students_shown": len(shown), "students_correct": sum(bool(e["is_correct"]) for e in answered.values()),
+            "attempts": attempts, "correct_percent": accuracy,
+            "first_attempt_percent": first_accuracy, "final_accuracy": accuracy,
+            "retry_gain": round(accuracy-first_accuracy, 1) if accuracy is not None and first_accuracy is not None else None,
+            "retry_rate": retry_rate, "attempts_per_student": round(attempts/len(shown), 2) if shown else None,
+            "skip_timeout_rate": skip_rate, "empirical_difficulty": empirical,
+            "confidence": _confidence(len(answered), attempts, 1, config),
+            "discrimination": discr, "discrimination_label": discr_label,
+            "discrimination_sample_size": discr_n, "response_time": timing,
+            "options": option_rows, "review_priority_score": priority_score,
+            "review_priority": priority, "review_reasons": reasons})
 
-        params = {"lecture_id": lecture_id, "cohort": cohort}
+    topics = []
+    for topic, topic_items in topic_qids.items():
+        keys = [key for key in final if key[1] in topic_items]
+        answered = [final[key] for key in keys if final[key]["answered_at"] is not None]
+        initial = [first[key] for key in keys if first[key]["answered_at"] is not None]
+        final_acc = _percent(sum(bool(e["is_correct"]) for e in answered), len(answered))
+        first_acc = _percent(sum(bool(e["is_correct"]) for e in initial), len(initial))
+        participants = {sid for sid, _ in keys}
+        retried = {sid for sid, qid in keys if len(responses[(sid, qid)]) > 1}
+        below = [values for sid in participants if (values := student_topics[sid].get(topic, []))
+                 and _percent(sum(values), len(values)) < config.mastery_threshold]
+        evidenced = sum(bool(student_topics[sid].get(topic)) for sid in participants)
+        conclusive = len(topic_items) >= config.min_topic_questions and topic_attempts[topic] >= config.min_topic_attempts
+        topics.append({"topic": topic, "questions": len(topic_items),
+            "participating_students": len(participants), "attempts": topic_attempts[topic],
+            "first_attempt_accuracy": first_acc, "final_accuracy": final_acc,
+            "retry_gain": round(final_acc-first_acc, 1) if final_acc is not None and first_acc is not None else None,
+            "retry_rate": _percent(len(retried), len(participants)),
+            "median_response_time": _stats([e["response_time_ms"] for e in answered if e["response_time_ms"] is not None], 1000)["median"],
+            "students_below_mastery_percent": _percent(len(below), evidenced),
+            "confidence": _confidence(len(participants), topic_attempts[topic], len(topic_items), config) if conclusive else "LOW",
+            "conclusive": conclusive, "evidence_note": None if conclusive else "insufficient evidence"})
+    topics.sort(key=lambda t: (t["final_accuracy"] is None, t["final_accuracy"] or 0))
 
-        cur.execute(QUESTIONS_SQL, params)
-        question_rows = cur.fetchall()
+    weak_topics = {t["topic"] for t in topics if t["conclusive"] and t["final_accuracy"] is not None
+                   and t["final_accuracy"] < config.mastery_threshold}
+    for row in students:
+        weak = sorted(topic for topic in weak_topics if (values := student_topics[row["student_id"]].get(topic, []))
+                      and _percent(sum(values), len(values)) < config.mastery_threshold)
+        category, issue = _support(row["completed"], row["score_percent"], row["attempted_accuracy"],
+                                   row["first_attempt_accuracy"], row["retry_rate"], weak, config)
+        row.update({"weakest_topics": weak[:2], "support_category": category, "primary_issue": issue})
+    students.sort(key=lambda r: (r["support_category"] == "STRONG_PERFORMANCE", -(r["score_percent"] or -1), r["student_id"]))
 
-        cur.execute(TOPICS_SQL, params)
-        topic_rows = cur.fetchall()
+    started, completed = [s for s in students if s["started"]], [s for s in students if s["completed"]]
+    final_answered = [e for e in final.values() if e["answered_at"] is not None]
+    first_answered = [e for e in first.values() if e["answered_at"] is not None]
+    final_accuracy = _percent(sum(bool(e["is_correct"]) for e in final_answered), len(final_answered))
+    first_accuracy = _percent(sum(bool(e["is_correct"]) for e in first_answered), len(first_answered))
+    durations = [(s["submitted_at"]-s["started_at"]).total_seconds() for values in sittings.values()
+                 for s in values if s["status"] == "submitted" and s["submitted_at"]]
+    retry_students = {sid for (sid, _), values in responses.items() if len(values) > 1}
+    summary = {"total_questions": len(qids), "cohort_size": len(cohort),
+        "students_attempted": len(started), "students_completed": len(completed),
+        "participation_percent": _percent(len(started), len(cohort)),
+        "completion_percent": _percent(len(completed), len(started)),
+        "abandonment_percent": _percent(len(started)-len(completed), len(started)),
+        "average_score": round(mean(score_values), 1) if score_values else None,
+        "median_score": round(median(score_values), 1) if score_values else None,
+        "pass_mark": pass_mark, "pass_rate": _percent(sum(s >= pass_mark for s in score_values), len(score_values)),
+        "average_accuracy": final_accuracy, "first_attempt_accuracy": first_accuracy,
+        "final_accuracy": final_accuracy,
+        "learning_gain": round(final_accuracy-first_accuracy, 1) if final_accuracy is not None and first_accuracy is not None else None,
+        "average_attempts_per_question": round(len(response_rows)/len(responses), 2) if responses else None,
+        "students_needing_retry_percent": _percent(len(retry_students), len(started)),
+        "total_response_events": len(response_rows), "attempts_from_non_enrolled": outsiders,
+        "duration": _stats(durations), "response_time": response_time,
+        "difficulty_distribution": difficulty_counts,
+        "confidence": _confidence(len(started), len(response_rows), len(qids), config)}
 
-        cur.execute(ROSTER_SQL, params)
-        roster_rows = cur.fetchall()
-
-        cur.execute(OPTIONS_SQL, params)
-        option_rows = cur.fetchall()
-
-        cur.execute(ANSWERS_SQL, (lecture_id,))
-        answer_rows = cur.fetchall()
-
-        cur.execute(OUTSIDERS_SQL, params)
-        outsiders = cur.fetchone()[0]
-
-    total_questions = len(question_rows)
-
-    picks_by_question = {}
-
-    for question_id, chosen, count, first in option_rows:
-        picks_by_question.setdefault(question_id, []).append((chosen, count, first))
-
-    answers = {row[0]: (row[1], row[2]) for row in answer_rows}
-
-    questions = []
-
-    for (question_id, stem, difficulty, topic, students, attempts,
-         students_correct, first_tries, first_correct) in question_rows:
-
-        correct_percent = _percent(students_correct, students)
-
-        correct_option, options = answers.get(question_id, (None, []))
-
-        distribution, answered_with_choice = _distractors(
-            picks_by_question.get(question_id, []), correct_option, options
-        )
-
-        questions.append({
-            "question_id": question_id,
-            "stem": stem,
-            "topic": topic,
-            "difficulty": difficulty,
-            "students_answered": students,
-            "attempts": attempts,
-            "students_correct": students_correct,
-            "correct_percent": correct_percent,
-            "first_attempt_percent": _percent(first_correct, first_tries),
-            # Above 1.0 means the class needed more than one go on average.
-            "attempts_per_student": (
-                round(attempts / students, 2) if students else None
-            ),
-            "reliable": students >= MIN_ANSWERS,
-            "calibration": _calibration(difficulty, correct_percent),
-            "correct_option": correct_option,
-            "options": distribution,
-            # How many attempts the distribution is built from. Lower than
-            # `attempts` wherever answers predate the selected_option column.
-            "answers_recorded": answered_with_choice,
-            "top_distractor": _top_distractor(distribution),
-        })
-
-    topics = [
-        {
-            "topic": topic,
-            "questions": question_count,
-            "students_answered": students,
-            "attempts": attempts,
-            "correct_percent": _percent(correct_attempts, attempts),
-            "reliable": attempts >= MIN_ANSWERS,
-        }
-        for topic, question_count, students, attempts, correct_attempts in topic_rows
-    ]
-
-    roster = []
-
-    for student_id, name, email, answered, correct, attempts in roster_rows:
-
-        roster.append({
-            "student_id": student_id,
-            "name": name,
-            "email": email,
-            "questions_answered": answered,
-            "questions_correct": correct,
-            "attempts": attempts,
-            # Unanswered counts against the score, which is what a mark means.
-            "score_percent": _percent(correct, total_questions),
-            # Fair to a partial sitting, and the right lens on the questions.
-            "accuracy_percent": _percent(correct, answered),
-            "completed": answered >= total_questions and total_questions > 0,
-        })
-
-    roster.sort(key=lambda row: (row["score_percent"] or 0), reverse=True)
-
-    scores = [row["score_percent"] for row in roster if row["score_percent"] is not None]
-    completed = [row for row in roster if row["completed"]]
-    completed_scores = [row["score_percent"] for row in completed]
-
-    summary = {
-        "total_questions": total_questions,
-        "cohort_size": len(cohort) if cohort is not None else None,
-        "students_attempted": len(roster),
-        "students_completed": len(completed),
-        "participation_percent": (
-            _percent(len(roster), len(cohort)) if cohort else None
-        ),
-        "total_attempts": sum(row["attempts"] for row in roster),
-        # Over everyone who sat any of it, unanswered counting as wrong.
-        "average_score": round(mean(scores), 1) if scores else None,
-        "median_score": round(median(scores), 1) if scores else None,
-        # Over those who answered every question — the honest exam average.
-        "average_score_completed": (
-            round(mean(completed_scores), 1) if completed_scores else None
-        ),
-        "average_accuracy": (
-            round(mean([row["accuracy_percent"] for row in roster
-                        if row["accuracy_percent"] is not None]), 1)
-            if roster else None
-        ),
-        "pass_mark": pass_mark,
-        "pass_rate": _percent(
-            sum(1 for score in scores if score >= pass_mark), len(scores)
-        ),
-        "attempts_from_non_enrolled": outsiders,
-    }
-
-    ranked = [q for q in questions if q["correct_percent"] is not None and q["reliable"]]
-
-    return {
-        "lecture_id": lecture_id,
-        "lecture_title": title,
-        "course_id": course_id,
-        "course_title": course_title,
-        "doctor_name": doctor_name,
-        "pass_mark": pass_mark,
-        "summary": summary,
-        "score_distribution": _distribution(scores),
-        "questions": questions,
-        "topics": sorted(topics, key=lambda row: (row["correct_percent"] or 0)),
-        "roster": roster,
-        "hardest": min(ranked, key=lambda q: q["correct_percent"])["question_id"]
-                   if ranked else None,
-        "easiest": max(ranked, key=lambda q: q["correct_percent"])["question_id"]
-                   if ranked else None,
-    }
-
-
-LIST_SQL = """
-    SELECT
-        l.id,
-        l.title,
-        c.id,
-        c.title,
-        count(DISTINCT q.id) AS questions,
-        count(DISTINCT a.student_id) AS students_attempted,
-        count(a.id) AS attempts,
-        max(a.answered_at) AS last_answered
-    FROM lectures AS l
-    JOIN questions AS q ON q.lecture_id = l.id
-    LEFT JOIN courses AS c ON c.id = l.course_id
-    LEFT JOIN question_attempts AS a ON a.question_id = q.id
-    WHERE (%(course_id)s::int IS NULL OR l.course_id = %(course_id)s)
-      AND (%(doctor_id)s::int IS NULL OR l.doctor_id = %(doctor_id)s)
-    GROUP BY l.id, l.title, c.id, c.title
-    ORDER BY max(a.answered_at) DESC NULLS LAST, l.id
-"""
+    clusters = []
+    for topic in topics:
+        related = [q for q in question_stats if q["topic"] == topic["topic"]]
+        dominant = sum(any(o["classification"] == "strong_misconception" for o in q["options"]) for q in related)
+        missed = sum((q["first_attempt_percent"] if q["first_attempt_percent"] is not None else 100) < config.mastery_threshold for q in related)
+        if len(related) >= config.min_topic_questions and (dominant or missed >= 2):
+            clusters.append({"topic": topic["topic"], "questions": len(related),
+                "dominant_distractor_questions": dominant, "low_first_attempt_questions": missed,
+                "confidence": topic["confidence"],
+                "message": "Repeated response pattern; review concept or item wording"})
+    priorities = sorted(question_stats, key=lambda q: (-q["review_priority_score"], q["order"]))
+    actions = []
+    if priorities and priorities[0]["review_priority"] == "HIGH":
+        actions.append(f"Review wording and answer options for question {priorities[0]['order']}.")
+    conclusive_weak = [t for t in topics if t["conclusive"] and t["final_accuracy"] is not None and t["final_accuracy"] < config.mastery_threshold]
+    if conclusive_weak:
+        actions.append(f"Reteach {conclusive_weak[0]['topic']} with a short worked example.")
+    support_count = sum(s["support_category"] == "NEEDS_SUPPORT" for s in students)
+    if support_count:
+        actions.append(f"Plan targeted follow-up for {support_count} student(s) needing support.")
+    if summary["abandonment_percent"]:
+        actions.append("Contact students with incomplete attempts and check access or timing barriers.")
+    if not actions:
+        actions.append("Keep the current teaching sequence and monitor the next assessment.")
+    logger.info("assessment analytics built", extra={"exam_id": exam_id,
+        "cohort_size": len(cohort), "response_events": len(response_rows),
+        "confidence": summary["confidence"]})
+    answered_questions = [q for q in question_stats if q["correct_percent"] is not None]
+    return {"exam_id": exam[0], "exam_title": exam[1], "course_id": exam[2],
+        "course_title": exam[3], "doctor_name": exam[4], "pass_mark": pass_mark,
+        "summary": summary, "score_distribution": _distribution(score_values),
+        "questions": question_stats, "topics": topics, "roster": students,
+        "misconception_clusters": clusters, "teaching_actions": actions[:5],
+        "hardest": min(answered_questions, key=lambda q: q["correct_percent"])["question_id"] if answered_questions else None,
+        "easiest": max(answered_questions, key=lambda q: q["correct_percent"])["question_id"] if answered_questions else None,
+        "methodology": {"difficulty_thresholds": {"easy_at": config.easy_at,
+            "moderate_at": config.moderate_at},
+            "discrimination": "point-biserial Pearson correlation of final item result with score on all other items",
+            "topic_min_questions": config.min_topic_questions,
+            "topic_min_attempts": config.min_topic_attempts, "llm_used": False}}
 
 
 def available(conn, course_id=None, doctor_id=None):
-    """Every lecture that has questions, so the instructor can pick one."""
-
+    if doctor_id is None:
+        return []
     with conn.cursor() as cur:
-
         cur.execute(LIST_SQL, {"course_id": course_id, "doctor_id": doctor_id})
-
-        return [
-            {
-                "lecture_id": row[0],
-                "lecture_title": row[1],
-                "course_id": row[2],
-                "course_title": row[3],
-                "total_questions": row[4],
-                "students_attempted": row[5],
-                "attempts": row[6],
-                "last_answered": row[7],
-            }
-            for row in cur.fetchall()
-        ]
+        return [{"exam_id": r[0], "exam_title": r[1], "course_id": r[2],
+                 "course_title": r[3], "total_questions": r[4],
+                 "students_attempted": r[5], "attempts": r[6],
+                 "last_answered": r[7]} for r in cur.fetchall()]
