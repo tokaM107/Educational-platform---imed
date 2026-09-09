@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 
 from app.api import deps
 from app.main import app
-from app.services import security
+from app.services import authz, security
 from app.services.security import InvalidToken, VerifiedIdentity
 from tests.fake_db import FakeConn
 
@@ -526,7 +526,7 @@ def test_a_doctor_cannot_read_another_doctors_subscribers(client, conn):
     assert response.status_code == 403
 
 
-def test_a_doctor_cannot_read_exam_stats_for_a_lecture_they_do_not_own(
+def test_a_doctor_cannot_read_exam_stats_for_an_exam_they_do_not_own(
     client, conn
 ):
 
@@ -535,6 +535,13 @@ def test_a_doctor_cannot_read_exam_stats_for_a_lecture_they_do_not_own(
 
     # 404 rather than 403: a 403 would confirm the lecture exists.
     assert client.get("/api/exams/500", headers=AUTH).status_code == 404
+
+
+def test_exam_ownership_is_scoped_through_the_teachers_course():
+    conn = FakeConn(lambda sql, params: [(1,)] if "JOIN courses" in sql else [])
+
+    assert authz.owns_exam(conn, DOCTOR["id"], 77) is True
+    assert conn.params_for("FROM exams AS e") == (77, DOCTOR["id"])
 
 
 # -------------------------
@@ -565,6 +572,7 @@ def test_a_doctor_is_admitted_to_a_doctors_endpoint(client, conn):
     conn.answer = lambda sql, params: []
 
     assert client.get("/api/exams", headers=AUTH).status_code == 200
+    assert conn.params_for("c.doctor_id=%(doctor_id)s")["doctor_id"] == DOCTOR["id"]
 
 
 # -------------------------
