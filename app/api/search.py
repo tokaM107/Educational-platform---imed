@@ -11,8 +11,10 @@ folder name the owner chose rather than renaming the feature to suit Python.
 """
 
 import importlib.util
+import logging
 import sys
 from pathlib import Path
+from time import monotonic
 
 from fastapi import APIRouter, Depends
 
@@ -40,6 +42,7 @@ def _load(name):
 extract_info = _load("extract_info")
 assistant = _load("search")
 cases = _load("cases")
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(
@@ -63,12 +66,40 @@ def smart_search(
     at a student is worse than one that says it could not understand.
     """
 
-    envelope = extract_info.extract(
-        data.query,
-        history=[(turn.role, turn.content) for turn in data.history],
+    started = monotonic()
+    logger.info(
+        "AI search started: query_chars=%d history_turns=%d",
+        len(data.query),
+        len(data.history),
     )
 
-    result = assistant.search(envelope, conn=conn)
+    try:
+        envelope = extract_info.extract(
+            data.query,
+            history=[(turn.role, turn.content) for turn in data.history],
+        )
+
+        result = assistant.search(envelope, conn=conn)
+    except Exception:
+        logger.exception(
+            "AI search failed after %.3fs", monotonic() - started
+        )
+        raise
+
+    if result.get("outcome") == "error":
+        logger.error(
+            "AI search returned an error after %.3fs: %s",
+            monotonic() - started,
+            "; ".join(result.get("notes", [])) or "unknown error",
+        )
+    else:
+        logger.info(
+            "AI search completed: outcome=%s target=%s results=%d duration=%.3fs",
+            result.get("outcome"),
+            (result.get("plan") or {}).get("target", ""),
+            result.get("total", 0),
+            monotonic() - started,
+        )
 
     return SearchResponse(**{
         key: value for key, value in result.items() if key != "params"
