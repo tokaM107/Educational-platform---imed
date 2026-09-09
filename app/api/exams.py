@@ -1,8 +1,4 @@
-"""Instructor post-exam statistics.
-
-Read-only aggregation over `question_attempts` joined to `questions`. No model
-call, no stored state: the same attempts always produce the same page, in
-milliseconds.
+"""Instructor assessment analytics and teaching decision support.
 
 Doctors only. These figures describe a cohort rather than one student — pass
 rates, which distractor is catching people, how the class did — and that is a
@@ -29,7 +25,7 @@ def list_exams(
     conn=Depends(get_conn),
     current_user=Depends(require_doctor),
 ):
-    """The caller's own lectures that have questions, most recently answered first.
+    """The caller's own exams, most recently answered first.
 
     `doctor_id` is gone: it selected whose teaching to report on, and the only
     answer this endpoint should give is "yours".
@@ -41,19 +37,19 @@ def list_exams(
     ]
 
 
-@router.get("/{lecture_id}", response_model=ExamStats)
+@router.get("/{exam_id}", response_model=ExamStats)
 def exam_statistics(
-    lecture_id: int,
-    pass_mark: float = Query(
-        exam_stats.DEFAULT_PASS_MARK, ge=0, le=100,
-        description="Mark at or above which a student has passed.",
+    exam_id: int,
+    pass_mark: float | None = Query(
+        None, ge=0, le=100,
+        description="Optional report override; the persisted exam pass mark is the default.",
     ),
     conn=Depends(get_conn),
     current_user=Depends(require_doctor),
 ):
-    """How the class did on one lecture's questions.
+    """How the enrolled cohort performed on one persisted exam.
 
-    Restricted to the doctor who owns the lecture: being a teacher somewhere is
+    Restricted to the doctor whose course owns the exam: teaching elsewhere is
     not a reason to read the results of somebody else's class.
 
     Figures cover the enrolled cohort. Attempts by anyone not enrolled on the
@@ -61,14 +57,14 @@ def exam_statistics(
     row cannot quietly move an average.
     """
 
-    if not authz.owns_lecture(conn, current_user["id"], lecture_id):
-        # 404 rather than 403: this lecture is not the caller's to know about,
+    if not authz.owns_exam(conn, current_user["id"], exam_id):
+        # 404 rather than 403: this exam is not the caller's to know about,
         # and a 403 would confirm it exists.
-        raise HTTPException(status_code=404, detail="Lecture not found")
+        raise HTTPException(status_code=404, detail="Exam not found")
 
-    result = exam_stats.fetch(conn, lecture_id, pass_mark=pass_mark)
+    result = exam_stats.fetch(conn, exam_id, pass_mark=pass_mark)
 
     if result is None:
-        raise HTTPException(status_code=404, detail="Lecture not found")
+        raise HTTPException(status_code=404, detail="Exam not found")
 
     return ExamStats(**result)
