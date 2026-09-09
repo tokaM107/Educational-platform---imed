@@ -23,6 +23,7 @@ that hallucinates a column produces a dropped filter, never a broken query.
 
 import argparse
 import json
+import logging
 import os
 import sys
 from typing import Literal
@@ -37,6 +38,9 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from app.services.llm import ChatModel, LLMUnavailable  # noqa: E402
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -595,9 +599,10 @@ def extract(query, chat_model=None, history=None):
     plain text search or to tell the student to try again.
     """
 
-    model = chat_model or ChatModel()
-
     try:
+        # Construction belongs inside the guarded region: a missing/invalid API
+        # key fails while creating the client, before generate() is reached.
+        model = chat_model or ChatModel()
         plan = model.generate(
             SYSTEM_INSTRUCTION,
             f"سؤال الطالب:\n{query}",
@@ -610,9 +615,11 @@ def extract(query, chat_model=None, history=None):
         )
 
     except LLMUnavailable as error:
+        logger.error("AI search planner unavailable: %s", error)
         return {"ok": False, "query": query, "error": str(error), "plan": None}
 
     except Exception as error:  # a bad key, no network, a client-side failure
+        logger.exception("AI search planner failed: %s", type(error).__name__)
         return {
             "ok": False,
             "query": query,
