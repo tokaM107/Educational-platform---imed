@@ -1,107 +1,101 @@
-"""Response models for the instructor's post-exam view.
-
-Percentages are `float | None`: None means there was no denominator — nobody
-answered that question yet — which is a different statement from 0% and is shown
-differently.
-"""
+"""Teacher assessment analytics response contracts."""
 
 from datetime import datetime
-
 from pydantic import BaseModel, Field
 
 
-class OptionCount(BaseModel):
-    """One option offered by a question, and how many chose it.
+class DescriptiveStats(BaseModel):
+    mean: float | None = None
+    median: float | None = None
+    p25: float | None = None
+    p75: float | None = None
+    sample_size: int = 0
 
-    Every option is listed even at zero picks: a distractor nobody touches is a
-    finding of its own, because the question is really a narrower choice than it
-    looks.
-    """
 
-    option: str
-
-    # None for a recorded choice matching no option on the question — kept
-    # visible rather than dropped.
-    text: str | None
-
+class OptionStat(BaseModel):
+    option_id: int
+    text: str
     is_correct: bool
+    order: int
     picks: int
-    first_picks: int
-    percent: float | None
+    percent: float | None = None
+    high_performer_percent: float | None = None
+    low_performer_percent: float | None = None
+    classification: str
 
 
-class TopDistractor(BaseModel):
-    """The wrong option the class converged on, when one of them dominates."""
-
-    option: str
-    text: str | None
-    percent: float | None
-    picks: int
+class ResponseTimeStat(DescriptiveStats):
+    correct_median: float | None = None
+    incorrect_median: float | None = None
+    first_attempt_median: float | None = None
 
 
 class QuestionStat(BaseModel):
     question_id: int
     stem: str
+    type: str
+    points: int
+    order: int
     topic: str
-    difficulty: str | None
-
+    learning_objective: str | None = None
+    declared_difficulty: str | None = None
     students_answered: int
+    students_shown: int
     students_correct: int
     attempts: int
-
-    # A question counts as correct for a student if any attempt was right.
-    correct_percent: float | None
-
-    # The stricter reading: right first time, retries excluded.
-    first_attempt_percent: float | None
-
-    # Above 1.0 means the class needed more than one go on average.
-    attempts_per_student: float | None
-
-    # False when too few students answered for the percentage to mean anything.
-    reliable: bool
-
-    # "as_labelled" | "easier_than_labelled" | "harder_than_labelled" | None
-    calibration: str | None
-
-    # The answer key. This is why /api/exams is an instructor endpoint and must
-    # be behind authentication before launch.
-    correct_option: str | None
-    options: list[OptionCount] = Field(default_factory=list)
-
-    # Attempts the distribution was built from. Lower than `attempts` wherever
-    # answers predate the selected_option column, so a partial picture never
-    # reads as a complete one.
-    answers_recorded: int = 0
-
-    top_distractor: TopDistractor | None = None
+    correct_percent: float | None = None
+    first_attempt_percent: float | None = None
+    final_accuracy: float | None = None
+    retry_gain: float | None = None
+    retry_rate: float | None = None
+    attempts_per_student: float | None = None
+    skip_timeout_rate: float | None = None
+    empirical_difficulty: str | None = None
+    confidence: str
+    discrimination: float | None = None
+    discrimination_label: str
+    discrimination_sample_size: int
+    response_time: ResponseTimeStat
+    options: list[OptionStat] = Field(default_factory=list)
+    review_priority_score: float
+    review_priority: str
+    review_reasons: list[str] = Field(default_factory=list)
 
 
 class TopicStat(BaseModel):
     topic: str
     questions: int
-    students_answered: int
+    participating_students: int
     attempts: int
-    correct_percent: float | None
-    reliable: bool
+    first_attempt_accuracy: float | None = None
+    final_accuracy: float | None = None
+    retry_gain: float | None = None
+    retry_rate: float | None = None
+    median_response_time: float | None = None
+    students_below_mastery_percent: float | None = None
+    confidence: str
+    conclusive: bool
+    evidence_note: str | None = None
 
 
 class StudentStat(BaseModel):
     student_id: int
     name: str
     email: str
-
+    started: bool
+    completed: bool
     questions_answered: int
     questions_correct: int
-    attempts: int
-
-    # Out of every question in the exam: unanswered counts as wrong.
-    score_percent: float | None
-
-    # Out of what they actually attempted.
-    accuracy_percent: float | None
-
-    completed: bool
+    score_percent: float | None = None
+    attempted_accuracy: float | None = None
+    first_attempt_accuracy: float | None = None
+    retries: int
+    retry_rate: float | None = None
+    exam_attempts: int
+    duration_seconds: float | None = None
+    weakest_topics: list[str] = Field(default_factory=list)
+    support_category: str
+    primary_issue: str
 
 
 class ScoreBucket(BaseModel):
@@ -112,52 +106,64 @@ class ScoreBucket(BaseModel):
 
 class ExamSummary(BaseModel):
     total_questions: int
-
-    # None when the lecture belongs to no course, so there is no class to count.
-    cohort_size: int | None
+    cohort_size: int
     students_attempted: int
     students_completed: int
-    participation_percent: float | None
-    total_attempts: int
-
-    average_score: float | None
-    median_score: float | None
-    average_score_completed: float | None
-    average_accuracy: float | None
-
+    participation_percent: float | None = None
+    completion_percent: float | None = None
+    abandonment_percent: float | None = None
+    average_score: float | None = None
+    median_score: float | None = None
     pass_mark: float
-    pass_rate: float | None
-
-    # Excluded from every figure above, reported so nothing vanishes silently.
+    pass_rate: float | None = None
+    average_accuracy: float | None = None
+    first_attempt_accuracy: float | None = None
+    final_accuracy: float | None = None
+    learning_gain: float | None = None
+    average_attempts_per_question: float | None = None
+    students_needing_retry_percent: float | None = None
+    total_response_events: int
     attempts_from_non_enrolled: int
+    duration: DescriptiveStats
+    response_time: DescriptiveStats
+    difficulty_distribution: dict[str, int]
+    confidence: str
+
+
+class MisconceptionCluster(BaseModel):
+    topic: str
+    questions: int
+    dominant_distractor_questions: int
+    low_first_attempt_questions: int
+    confidence: str
+    message: str
 
 
 class ExamStats(BaseModel):
-    lecture_id: int
-    lecture_title: str
-    course_id: int | None
-    course_title: str | None
-    doctor_name: str | None
+    exam_id: int
+    exam_title: str
+    course_id: int
+    course_title: str
+    doctor_name: str
     pass_mark: float
-
     summary: ExamSummary
     score_distribution: list[ScoreBucket] = Field(default_factory=list)
     questions: list[QuestionStat] = Field(default_factory=list)
     topics: list[TopicStat] = Field(default_factory=list)
     roster: list[StudentStat] = Field(default_factory=list)
-
+    misconception_clusters: list[MisconceptionCluster] = Field(default_factory=list)
+    teaching_actions: list[str] = Field(default_factory=list)
     hardest: int | None = None
     easiest: int | None = None
+    methodology: dict
 
 
 class ExamListing(BaseModel):
-    """One lecture that has questions, for the picker."""
-
-    lecture_id: int
-    lecture_title: str
-    course_id: int | None
-    course_title: str | None
+    exam_id: int
+    exam_title: str
+    course_id: int
+    course_title: str
     total_questions: int
     students_attempted: int
     attempts: int
-    last_answered: datetime | None
+    last_answered: datetime | None = None
