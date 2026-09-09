@@ -106,7 +106,7 @@ class TutorService:
             history=None, summary="", continuity_chunk_ids=None):
         question = (question or "").strip()
         if not question:
-            return TutorAnswer(answer=prompts.NOT_IN_LECTURE, grounded=False)
+            return TutorAnswer(answer=prompts.not_in_lecture(question), grounded=False)
 
         standalone, rewrite_usage = self.contextualize(question, history, summary)
         query_embedding = query_cache.embed_query(
@@ -137,7 +137,7 @@ class TutorService:
 
         if not candidates and not continuity:
             return TutorAnswer(
-                answer=prompts.NOT_IN_LECTURE, grounded=False,
+                answer=prompts.not_in_lecture(question), grounded=False,
                 standalone_query=standalone,
                 rewrite_model_name=rewrite_model,
                 rewrite_input_tokens=rewrite_input,
@@ -201,7 +201,7 @@ class TutorService:
             }
         if not passages:
             return TutorAnswer(
-                answer=prompts.NOT_IN_LECTURE, grounded=False,
+                answer=prompts.not_in_lecture(question), grounded=False,
                 standalone_query=standalone,
                 rewrite_model_name=rewrite_model,
                 rewrite_input_tokens=rewrite_input,
@@ -248,7 +248,7 @@ class TutorService:
                     passages.pop()
                 else:
                     return TutorAnswer(
-                        answer=prompts.NOT_IN_LECTURE, grounded=False,
+                        answer=prompts.not_in_lecture(question), grounded=False,
                         standalone_query=standalone,
                         rewrite_model_name=rewrite_model,
                         rewrite_input_tokens=rewrite_input,
@@ -276,10 +276,10 @@ class TutorService:
         except LLMUnavailable as error:
             logger.error("chat model unavailable: %s", error)
             return TutorAnswer(
-                answer=prompts.LLM_DOWN, grounded=True,
+                answer=prompts.llm_down(question), grounded=True,
                 standalone_query=standalone, passages=passages,
                 segments=retrieval.to_segments(passages),
-                notice="المساعد الذكي مش متاح دلوقتي — الفيديو والمقاطع شغالة عادي.",
+                notice=prompts.assistant_unavailable_notice(question),
                 rewrite_model_name=rewrite_model,
                 rewrite_input_tokens=rewrite_input,
                 rewrite_output_tokens=rewrite_output,
@@ -303,14 +303,14 @@ class TutorService:
         )
         if not reply.found:
             return TutorAnswer(
-                answer=reply.answer or prompts.NOT_IN_LECTURE,
+                answer=reply.answer or prompts.not_in_lecture(question),
                 grounded=False, **common,
             )
 
         used = self._used_passages(passages, reply.used_excerpts)
         notice = None
         if any(passage.video_id != video_id for passage in used):
-            notice = "الإجابة دي من فيديو تاني مرتبط بنفس الكورس."
+            notice = prompts.cross_video_notice(question)
         return TutorAnswer(
             answer=reply.answer, grounded=True, passages=used,
             segments=retrieval.to_segments(used), notice=notice, **common,
