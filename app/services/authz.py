@@ -47,6 +47,14 @@ OWNS_COURSE_SQL = """
     LIMIT 1
 """
 
+OWNS_EXAM_SQL = """
+    SELECT 1
+    FROM exams AS e
+    JOIN courses AS c ON c.id = e.course_id
+    WHERE e.id = %s AND c.doctor_id = %s
+    LIMIT 1
+"""
+
 
 def _exists(conn, sql, params):
 
@@ -69,6 +77,10 @@ def owns_lecture(conn, doctor_id, lecture_id):
 def owns_course(conn, doctor_id, course_id):
 
     return _exists(conn, OWNS_COURSE_SQL, (course_id, doctor_id))
+
+
+def owns_exam(conn, doctor_id, exam_id):
+    return _exists(conn, OWNS_EXAM_SQL, (exam_id, doctor_id))
 
 
 def may_view_student(conn, current_user, student_id):
