@@ -7,7 +7,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from psycopg import Error as DatabaseError
 
 from app.config import get_settings
-from app.db import connection
+from app.db import connection, run_read
 from app.services import llm_quota
 from app.services.security import InvalidToken, decode_access_token
 from app.services.tutor import TutorService
@@ -44,7 +44,7 @@ def _unauthenticated(detail):
     )
 
 
-def _user_for_token(conn, token):
+def _user_for_token(token):
     """The application user a verified Supabase or Nest token resolves to.
 
     Three things have to hold, and each failure is a 401 because from the
@@ -68,18 +68,21 @@ def _user_for_token(conn, token):
     except InvalidToken:
         raise _unauthenticated("Invalid or expired token")
 
-    with conn.cursor() as cur:
-        if identity.source == "supabase":
-            cur.execute(
-                f"SELECT {_USER_COLUMNS} FROM users WHERE auth_user_id = %s",
-                (identity.subject,),
-            )
-        else:
-            cur.execute(
-                f"SELECT {_USER_COLUMNS} FROM users WHERE id = %s",
-                (identity.subject,),
-            )
-        row = cur.fetchone()
+    def load_user(conn):
+        with conn.cursor() as cur:
+            if identity.source == "supabase":
+                cur.execute(
+                    f"SELECT {_USER_COLUMNS} FROM users WHERE auth_user_id = %s",
+                    (identity.subject,),
+                )
+            else:
+                cur.execute(
+                    f"SELECT {_USER_COLUMNS} FROM users WHERE id = %s",
+                    (identity.subject,),
+                )
+            return cur.fetchone()
+
+    row = run_read(load_user, operation_name="current-user lookup")
 
     if row is None:
         raise _unauthenticated("User is not linked to an application account")
@@ -98,7 +101,6 @@ def _user_for_token(conn, token):
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
-    conn=Depends(get_conn),
 ):
     """The authenticated user from an accepted bearer access token.
 
@@ -110,7 +112,7 @@ def get_current_user(
     if credentials is None or not credentials.credentials:
         raise _unauthenticated("Not authenticated")
 
-    return _user_for_token(conn, credentials.credentials)
+    return _user_for_token(credentials.credentials)
 
 
 def get_current_user_streaming(
@@ -120,7 +122,6 @@ def get_current_user_streaming(
                     "a header on (a <video> element). Same token, same checks.",
     ),
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
-    conn=Depends(get_conn),
 ):
     """`get_current_user`, plus the one transport a <video> tag can manage.
 
@@ -141,7 +142,7 @@ def get_current_user_streaming(
     if not token:
         raise _unauthenticated("Not authenticated")
 
-    return _user_for_token(conn, token)
+    return _user_for_token(token)
 
 
 def require_role(*roles):

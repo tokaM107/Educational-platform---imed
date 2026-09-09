@@ -60,11 +60,14 @@ def client():
 
 
 @pytest.fixture
-def conn():
+def conn(monkeypatch):
     """A fake connection, installed for the request."""
 
     fake = FakeConn()
     app.dependency_overrides[deps.get_conn] = lambda: fake
+    monkeypatch.setattr(
+        deps, "run_read", lambda operation, **kwargs: operation(fake)
+    )
 
     yield fake
 

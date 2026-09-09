@@ -59,6 +59,36 @@ class Settings:
         self.database_url = os.getenv("DATABASE_URL", "")
         self.gemini_api_key = os.getenv("GEMINI_API_KEY", "")
 
+        # Keep application connections younger than the hosted Postgres/proxy
+        # idle window.  The pool also validates every checkout, so these are a
+        # first line of defence rather than the only stale-connection guard.
+        self.db_pool_min_size = int(env("DB_POOL_MIN_SIZE", "1"))
+        self.db_pool_max_size = int(env("DB_POOL_MAX_SIZE", "10"))
+        self.db_pool_timeout_seconds = float(env("DB_POOL_TIMEOUT_SECONDS", "10"))
+        self.db_pool_max_lifetime_seconds = float(
+            env("DB_POOL_MAX_LIFETIME_SECONDS", "1800")
+        )
+        self.db_pool_max_idle_seconds = float(
+            env("DB_POOL_MAX_IDLE_SECONDS", "300")
+        )
+        self.db_pool_reconnect_timeout_seconds = float(
+            env("DB_POOL_RECONNECT_TIMEOUT_SECONDS", "60")
+        )
+
+        if (
+            self.db_pool_min_size < 0
+            or self.db_pool_max_size <= 0
+            or self.db_pool_max_size < self.db_pool_min_size
+            or min(
+                self.db_pool_timeout_seconds,
+                self.db_pool_max_lifetime_seconds,
+                self.db_pool_max_idle_seconds,
+                self.db_pool_reconnect_timeout_seconds,
+            )
+            <= 0
+        ):
+            raise ValueError("invalid PostgreSQL pool settings")
+
         # --- Models ---
         self.embed_model = os.getenv("EMBED_MODEL", "gemini-embedding-2")
         self.embed_dim = int(os.getenv("EMBED_DIM", "1536"))

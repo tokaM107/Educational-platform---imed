@@ -10,6 +10,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from google.genai import errors as genai_errors
+from psycopg import Error as DatabaseError, OperationalError
+from psycopg_pool import PoolTimeout
 
 from app.api import (auth, chat, checkpoints, events, exams, lectures, notifications,
                      questions, reports, search, subscriptions, transcriptions,
@@ -69,6 +71,33 @@ app.include_router(subscriptions.router)
 app.include_router(search.router)
 app.include_router(webhooks.router)
 app.include_router(transcriptions.router)
+
+
+@app.exception_handler(PoolTimeout)
+def handle_pool_timeout(request: Request, error: PoolTimeout):
+    logging.getLogger(__name__).error("pool exhaustion: %s", error)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Database connection pool is temporarily exhausted."},
+    )
+
+
+@app.exception_handler(OperationalError)
+def handle_database_unavailable(request: Request, error: OperationalError):
+    logging.getLogger(__name__).error("database unavailable: %s", error)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Database is temporarily unavailable."},
+    )
+
+
+@app.exception_handler(DatabaseError)
+def handle_query_failure(request: Request, error: DatabaseError):
+    logging.getLogger(__name__).error("query failure: %s", error)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Database query failed."},
+    )
 
 @app.exception_handler(genai_errors.APIError)
 def handle_genai_error(request: Request, error: genai_errors.APIError):
