@@ -15,7 +15,7 @@ import uuid
 
 from pgvector.sqlalchemy.vector import VECTOR
 from sqlalchemy import BigInteger, Boolean, CHAR, CheckConstraint, Date, DateTime, Double, ForeignKeyConstraint, Index, Integer, Numeric, PrimaryKeyConstraint, SmallInteger, String, Text, UniqueConstraint, Uuid, text
-from sqlalchemy.dialects.postgresql import INET, JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, INET, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
@@ -272,6 +272,7 @@ class Topics(Base):
     checkpoint_questions: Mapped[list['CheckpointQuestions']] = relationship('CheckpointQuestions', back_populates='topic')
     questions: Mapped[list['Questions']] = relationship('Questions', back_populates='topic')
     chat_messages: Mapped[list['ChatMessages']] = relationship('ChatMessages', back_populates='topic')
+    exam_questions: Mapped[list['ExamQuestions']] = relationship('ExamQuestions', back_populates='topic_')
 
 
 class Users(Base):
@@ -317,6 +318,7 @@ class Users(Base):
     exam_attempts: Mapped[list['ExamAttempts']] = relationship('ExamAttempts', back_populates='user')
     lectures: Mapped[list['Lectures']] = relationship('Lectures', back_populates='doctor')
     assessment_question_results: Mapped[list['AssessmentQuestionResults']] = relationship('AssessmentQuestionResults', back_populates='student')
+    assessment_question_attempts: Mapped[list['AssessmentQuestionAttempts']] = relationship('AssessmentQuestionAttempts', back_populates='student')
     chat_sessions: Mapped[list['ChatSessions']] = relationship('ChatSessions', back_populates='student')
     essay_question_versions: Mapped[list['EssayQuestionVersions']] = relationship('EssayQuestionVersions', back_populates='users')
     reports: Mapped[list['Reports']] = relationship('Reports', back_populates='student')
@@ -905,6 +907,7 @@ class ExamAttempts(Base):
     exam: Mapped['Exams'] = relationship('Exams', back_populates='exam_attempts')
     user: Mapped['Users'] = relationship('Users', back_populates='exam_attempts')
     assessment_question_results: Mapped[list['AssessmentQuestionResults']] = relationship('AssessmentQuestionResults', back_populates='exam_attempt')
+    assessment_question_attempts: Mapped[list['AssessmentQuestionAttempts']] = relationship('AssessmentQuestionAttempts', back_populates='exam_attempt')
 
 
 class ExamQuestions(Base):
@@ -914,9 +917,11 @@ class ExamQuestions(Base):
         CheckConstraint('points > 0', name='exam_questions_points_check'),
         CheckConstraint("type::text = ANY (ARRAY['single_choice'::character varying, 'multi_choice'::character varying, 'true_false'::character varying, 'essay'::character varying]::text[])", name='exam_questions_type_check'),
         ForeignKeyConstraint(['exam_id'], ['public.exams.id'], ondelete='CASCADE', name='exam_questions_exam_id_fkey'),
+        ForeignKeyConstraint(['topic_id'], ['public.topics.id'], ondelete='SET NULL', name='exam_questions_topic_id_fkey'),
         PrimaryKeyConstraint('id', name='exam_questions_pkey'),
         UniqueConstraint('exam_id', 'order_index', name='exam_questions_exam_order_key'),
         Index('idx_exam_questions_exam', 'exam_id', 'order_index'),
+        Index('idx_exam_questions_topic', 'topic_id', postgresql_where='(topic_id IS NOT NULL)'),
         {'comment': 'Owned by the NestJS API. RLS enabled with no policies.',
      'schema': 'public'}
     )
@@ -932,10 +937,13 @@ class ExamQuestions(Base):
     cognitive_level: Mapped[Optional[str]] = mapped_column(String(20))
     difficulty: Mapped[Optional[str]] = mapped_column(String(20))
     topic: Mapped[Optional[str]] = mapped_column(Text)
+    topic_id: Mapped[Optional[int]] = mapped_column(Integer)
 
     essay_submissions: Mapped[list['EssaySubmissions']] = relationship('EssaySubmissions', back_populates='exam_question')
     exam: Mapped['Exams'] = relationship('Exams', back_populates='exam_questions')
     assessment_question_results: Mapped[list['AssessmentQuestionResults']] = relationship('AssessmentQuestionResults', back_populates='exam_question')
+    assessment_question_attempts: Mapped[list['AssessmentQuestionAttempts']] = relationship('AssessmentQuestionAttempts', back_populates='exam_question')
+    topic_: Mapped[Optional['Topics']] = relationship('Topics', back_populates='exam_questions')
     essay_question_versions: Mapped[list['EssayQuestionVersions']] = relationship('EssayQuestionVersions', back_populates='exam_question')
     exam_options: Mapped[list['ExamOptions']] = relationship('ExamOptions', back_populates='question')
     essay_question_releases: Mapped[list['EssayQuestionReleases']] = relationship('EssayQuestionReleases', back_populates='exam_question')
@@ -977,6 +985,44 @@ class Lectures(Base):
     student_study_sessions: Mapped[list['StudentStudySessions']] = relationship('StudentStudySessions', back_populates='lecture')
     transcript_chunks: Mapped[list['TranscriptChunks']] = relationship('TranscriptChunks', back_populates='lecture')
     video_events: Mapped[list['VideoEvents']] = relationship('VideoEvents', back_populates='lecture')
+
+
+class AssessmentQuestionAttempts(Base):
+    __tablename__ = 'assessment_question_attempts'
+    __table_args__ = (
+        CheckConstraint('NOT (skipped AND timed_out) AND (answered_at IS NOT NULL AND is_correct IS NOT NULL AND selected_option_ids IS NOT NULL AND NOT skipped AND NOT timed_out OR answered_at IS NULL AND is_correct IS NULL AND selected_option_ids IS NULL AND (skipped OR timed_out))', name='assessment_question_attempts_outcome'),
+        CheckConstraint('answered_at IS NULL AND response_time_ms IS NULL OR answered_at IS NOT NULL AND response_time_ms IS NOT NULL', name='assessment_question_attempts_response_time'),
+        CheckConstraint('attempt_number > 0', name='assessment_question_attempts_attempt_number_check'),
+        CheckConstraint('response_time_ms IS NULL OR response_time_ms >= 0', name='assessment_question_attempts_response_time_ms_check'),
+        ForeignKeyConstraint(['exam_attempt_id'], ['public.exam_attempts.id'], ondelete='CASCADE', name='assessment_question_attempts_exam_attempt_id_fkey'),
+        ForeignKeyConstraint(['exam_question_id'], ['public.exam_questions.id'], ondelete='CASCADE', name='assessment_question_attempts_exam_question_id_fkey'),
+        ForeignKeyConstraint(['student_id'], ['public.users.id'], ondelete='CASCADE', name='assessment_question_attempts_student_id_fkey'),
+        PrimaryKeyConstraint('id', name='assessment_question_attempts_pkey'),
+        UniqueConstraint('exam_attempt_id', 'exam_question_id', 'attempt_number', name='assessment_question_attempts_exam_attempt_id_exam_question__key'),
+        Index('idx_assessment_question_attempts_exam_student', 'exam_attempt_id', 'student_id'),
+        Index('idx_assessment_question_attempts_question_time', 'exam_question_id', 'answered_at'),
+        Index('idx_assessment_question_attempts_student_question_attempt', 'student_id', 'exam_question_id', 'attempt_number', 'created_at'),
+        {'comment': 'Raw per-question response evidence; teacher analytics are derived, never stored here.',
+         'schema': 'public'}
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    exam_attempt_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    exam_question_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    student_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    attempt_number: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text('1'), comment='Retry sequence within one exam attempt and question; starts at 1.')
+    shown_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), nullable=False)
+    skipped: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text('false'))
+    timed_out: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text('false'))
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(True), nullable=False, server_default=text('now()'))
+    selected_option_ids: Mapped[Optional[list[int]]] = mapped_column(ARRAY(Integer()))
+    is_correct: Mapped[Optional[bool]] = mapped_column(Boolean)
+    answered_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime(True))
+    response_time_ms: Mapped[Optional[int]] = mapped_column(Integer, comment='Client-observed duration from question shown to answered, in milliseconds.')
+
+    exam_attempt: Mapped['ExamAttempts'] = relationship('ExamAttempts', back_populates='assessment_question_attempts')
+    exam_question: Mapped['ExamQuestions'] = relationship('ExamQuestions', back_populates='assessment_question_attempts')
+    student: Mapped['Users'] = relationship('Users', back_populates='assessment_question_attempts')
 
 
 class AssessmentQuestionResults(Base):
