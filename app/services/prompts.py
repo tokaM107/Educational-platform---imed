@@ -11,10 +11,12 @@ Anti-hallucination has three layers:
      on-topic 0.25-0.31, off-topic 0.39).
 """
 
+import re
+
 from pydantic import BaseModel, Field
 
 
-ANSWER_PROMPT_VERSION = "lecture-answer-v2"
+ANSWER_PROMPT_VERSION = "lecture-answer-v3-language-mirroring"
 REWRITE_PROMPT_VERSION = "followup-rewrite-v1"
 SUMMARY_PROMPT_VERSION = "conversation-summary-v1"
 
@@ -25,7 +27,10 @@ class TutorReply(BaseModel):
     found: bool = Field(
         description="true only if the excerpts actually answer the question"
     )
-    answer: str = Field(description="the simplified answer, in Egyptian Arabic")
+    answer: str = Field(
+        description="the simplified answer, matching the latest student's language "
+                    "and, for Arabic, their dialect or register"
+    )
     used_excerpts: list[int] = Field(
         default_factory=list,
         description="numbers of the excerpts the answer was built from",
@@ -43,31 +48,39 @@ class ConversationSummaryReply(BaseModel):
 
 
 SYSTEM_INSTRUCTION = """\
-أنت مساعد تعليمي لطلبة كليات الطب، وشغلتك الوحيدة إنك تشرح كلام دكتور المحاضرة \
-بشكل مبسط.
+You are an educational assistant for medical students. Your only job is to explain
+the lecturer's material simply.
 
-قواعد لازم تمشي عليها:
+MANDATORY LANGUAGE AND VOICE RULE:
+- Match the language of the student's LATEST ORIGINAL QUESTION, not the transcript,
+  standalone retrieval query, summary, or earlier turns.
+- If that question is in English, answer entirely in English.
+- If it is in Arabic, answer in Arabic and mirror the student's dialect and register:
+  Egyptian Arabic for Egyptian wording, Modern Standard Arabic for formal Arabic,
+  and the corresponding dialect for other Arabic dialects. Never default every
+  Arabic student to Egyptian Arabic.
+- If the student naturally mixes Arabic and English, mirror that style naturally,
+  especially for medical terminology. Do not translate their voice into a different
+  dialect or a more formal/informal register.
 
-1. اعتمد **فقط** على "مقاطع المحاضرة" المرفقة في الرسالة. ممنوع تضيف أي معلومة \
-من برة المحاضرة، حتى لو كنت متأكد إنها صح طبياً.
-2. لو المقاطع مفيهاش إجابة كافية، قول بوضوح: "الجزء ده مش موجود في المحاضرة" \
-واقترح على الطالب يسأل سؤال تاني. ممنوع التخمين.
-3. بسّط شرح الدكتور بلغة سهلة، وحافظ على نفس ترتيب الفكرة اللي شرحها بيها.
-4. **لازم** تذكر أمثلة الدكتور نفسه وطرق التذكر اللي استخدمها (زي ما بيشبّه عظمة \
-العضد بالـ hammer)، لأن دي اللي الطالب هيفتكرها في الامتحان. لو المقطع فيه مثال، \
-اذكره بنص كلام الدكتور تقريباً.
-5. المصطلح الطبي اكتبه زي ما الدكتور نطقه، وحطّ جنبه الإنجليزي بين قوسين لما تعرفه.
-6. رد بالعامية المصرية، مختصر: من ٣ لـ ٦ جمل أو نقاط.
-7. بعد كل معلومة حطّ رقم المقطع اللي جبتها منه كده [1] أو [2].
-8. ما تخترعش أرقام دقايق أو ثواني — الطالب هيشوف الفيديو نفسه.
+GROUNDING RULES:
+1. Use ONLY the supplied transcript excerpts. Never add outside medical knowledge,
+   even when you know it is correct.
+2. If the excerpts do not contain enough evidence, clearly say that this part is not
+   covered in the lecture and invite a different question, using the same language
+   and dialect as the student's latest question. Never guess.
+3. Simplify the lecturer's explanation and preserve the order of their ideas.
+4. Include the lecturer's own examples and memory aids when they appear in an excerpt.
+5. Preserve medical terms as the lecturer used them. Add a parenthetical English term
+   only when it genuinely helps the explanation.
+6. Keep the response concise: 3 to 6 sentences or bullet points.
+7. Cite every factual statement with its excerpt number, such as [1] or [2].
+8. Never invent timestamps; the application provides video navigation separately.
 
-الرد لازم يكون JSON بالشكل ده:
-
-- found: تحطها true بس لو المقاطع فيها إجابة حقيقية للسؤال. لو السؤال عن موضوع \
-تاني خالص مش في المحاضرة، حطها false.
-- answer: الإجابة المبسطة (أو جملة الاعتذار لو found = false).
-- used_excerpts: أرقام المقاطع اللي بنيت عليها الإجابة فعلاً — مش كل المقاطع \
-اللي اتعرضت عليك، بس اللي استخدمتها.
+Return JSON matching this contract:
+- found: true only when the excerpts genuinely answer the question.
+- answer: the simplified answer, or the same-language/dialect refusal when false.
+- used_excerpts: only the excerpt numbers actually used in the answer.
 """
 
 REWRITE_SYSTEM_INSTRUCTION = """\
@@ -90,10 +103,82 @@ NOT_IN_LECTURE = (
     "جرّب تسأل عن نقطة اتشرحت فيها، وأنا هوديك على مكانها في الفيديو."
 )
 
+NOT_IN_LECTURE_AR = (
+    "هذا الجزء غير مذكور في هذه المحاضرة. "
+    "جرّب أن تسأل عن نقطة شُرحت فيها، وسأرشدك إلى موضعها في الفيديو."
+)
+
+NOT_IN_LECTURE_EN = (
+    "This part is not covered in this lecture. "
+    "Try asking about a topic explained in it, and I’ll point you to the right "
+    "place in the video."
+)
+
 LLM_DOWN = (
     "لقيت مكان الإجابة في المحاضرة وحطيتهولك على الفيديو تحت 👇 "
     "بس الشرح المبسّط مش متاح دلوقتي، اسمع كلام الدكتور نفسه من المقطع."
 )
+
+LLM_DOWN_AR = (
+    "وجدتُ موضع الإجابة في المحاضرة وأرفقتُ مقطع الفيديو أدناه، لكن الشرح "
+    "المبسّط غير متاح مؤقتاً. يمكنك الاستماع إلى شرح المحاضر في ذلك المقطع."
+)
+
+LLM_DOWN_EN = (
+    "I found the relevant place in the lecture and linked the video segment below, "
+    "but the simplified explanation is temporarily unavailable. You can still hear "
+    "the lecturer’s explanation in that segment."
+)
+
+
+_ARABIC_CHARACTER = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]")
+_EGYPTIAN_MARKER = re.compile(
+    r"(?:^|\s)(?:إيه|ايه|إزاي|ازاي|ليه|عايز|عاوز|ده|دي|دول|مش|مفيش|فين|"
+    r"كده|بتاع|قولي|اشرحلي)(?:\s|$|[؟?!،,.])"
+)
+
+
+def uses_arabic(text):
+    """Whether the latest student message is written using Arabic script."""
+
+    return bool(_ARABIC_CHARACTER.search(text or ""))
+
+
+def uses_egyptian_arabic(text):
+    """Recognize common Egyptian markers for deterministic fallback copy."""
+
+    return bool(_EGYPTIAN_MARKER.search(text or ""))
+
+
+def not_in_lecture(question):
+    if not uses_arabic(question):
+        return NOT_IN_LECTURE_EN
+    return NOT_IN_LECTURE if uses_egyptian_arabic(question) else NOT_IN_LECTURE_AR
+
+
+def llm_down(question):
+    if not uses_arabic(question):
+        return LLM_DOWN_EN
+    return LLM_DOWN if uses_egyptian_arabic(question) else LLM_DOWN_AR
+
+
+def cross_video_notice(question):
+    if uses_egyptian_arabic(question):
+        return "الإجابة دي من فيديو تاني مرتبط بنفس الكورس."
+    if uses_arabic(question):
+        return "هذه الإجابة من فيديو آخر مرتبط بالمقرر نفسه."
+    return "This answer comes from another video in the same course."
+
+
+def assistant_unavailable_notice(question):
+    if uses_egyptian_arabic(question):
+        return "المساعد الذكي مش متاح دلوقتي — الفيديو والمقاطع شغالة عادي."
+    if uses_arabic(question):
+        return "المساعد الذكي غير متاح حالياً، لكن الفيديو والمقاطع ما زالت متاحة."
+    return (
+        "The AI assistant is temporarily unavailable, but the video and its "
+        "segments are still available."
+    )
 
 
 def to_stamp(seconds):
@@ -154,7 +239,10 @@ def build_conversational_prompt(question, standalone_query, passages, summary=""
         f"Original student question: {question}\n"
         f"Standalone retrieval query: {standalone_query}\n\n"
         "Answer the original question using only the transcript excerpts. "
-        "Use conversation memory only to understand references."
+        "Use conversation memory only to understand references. Match the language, "
+        "Arabic dialect, code-switching, and level of formality of the ORIGINAL "
+        "student question exactly; other text in this prompt must not influence the "
+        "response language."
     )
 
 
