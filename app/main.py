@@ -29,7 +29,13 @@ settings = get_settings()
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
+    # Uvicorn configures logging before importing the application. Without
+    # force, an existing root handler can make this call a no-op, which leaves
+    # application/search logs invisible in some production launchers.
+    force=True,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -38,12 +44,28 @@ async def lifespan(app: FastAPI):
     # Authentication is a deployment boundary, not an optional feature. Refuse
     # to start before accepting traffic if the shared Nest user-token secret is
     # absent or too short.
-    settings.require_nest_jwt_access_secret()
-    open_pool()
+    logger.info(
+        "application startup: log_level=%s ai_model=%s ai_fallback=%s",
+        os.getenv("LOG_LEVEL", "INFO"),
+        settings.chat_model,
+        settings.chat_fallback_model,
+    )
+
+    try:
+        settings.require_nest_jwt_access_secret()
+        open_pool()
+    except Exception:
+        # Lifespan errors never reach FastAPI exception handlers. Log here so
+        # a dead API doesn't look like a CORS error in Swagger with no cause.
+        logger.critical("application startup failed", exc_info=True)
+        raise
+
+    logger.info("application startup complete; database pool is ready")
 
     yield
 
     close_pool()
+    logger.info("application shutdown complete")
 
 
 app = FastAPI(
