@@ -15,3 +15,7 @@ review by both service owners before it is applied.
 queue that turns a finished Bunny upload into exactly one transcription. It
 touches no NestJS-owned or shared table, so it needs only the FastAPI owner —
 but it must still be applied from `educational-platform-db`, not from here.
+
+`20260909_assessment_analytics.sql` adds raw per-question assessment responses
+and nullable question taxonomy metadata. Its authoritative migration is
+`way2APlus_db/supabase/migrations/20260909120000_assessment_analytics.sql`.
