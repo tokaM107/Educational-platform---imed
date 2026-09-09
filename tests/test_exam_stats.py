@@ -1,140 +1,104 @@
-"""Post-exam statistics: the shaping rules around the SQL aggregation."""
+"""Boundary and psychometric tests for deterministic assessment analytics."""
 
 from app.services import exam_stats
 
 
-def test_a_percentage_with_no_denominator_is_none_not_zero():
-    """"Nobody answered" and "everybody got it wrong" are opposite findings."""
-
-    assert exam_stats._percent(0, 10) == 0.0
-    assert exam_stats._percent(3, 4) == 75.0
+def test_score_percentage_keeps_zero_distinct_from_missing():
+    assert exam_stats._percent(0, 6) == 0
+    assert exam_stats._percent(1, 6) == 16.7
     assert exam_stats._percent(0, 0) is None
-    assert exam_stats._percent(5, None) is None
 
 
-def test_difficulty_calibration_flags_a_mislabelled_question():
-
-    assert exam_stats._calibration("hard", 96.0) == "easier_than_labelled"
-    assert exam_stats._calibration("easy", 20.0) == "harder_than_labelled"
-    assert exam_stats._calibration("hard", 40.0) == "as_labelled"
-    assert exam_stats._calibration("easy", 90.0) == "as_labelled"
-    assert exam_stats._calibration("medium", 55.0) == "as_labelled"
+def test_distribution_counts_unanswered_score_and_full_marks_once():
+    buckets = exam_stats._distribution([0, 19.9, 20, 40, 59.9, 60, 80, 100])
+    assert [b["students"] for b in buckets] == [2, 1, 2, 1, 2]
 
 
-def test_calibration_says_nothing_without_a_label_or_a_result():
-    """Silence beats a verdict invented from a missing input."""
-
-    assert exam_stats._calibration(None, 90.0) is None
-    assert exam_stats._calibration("", 90.0) is None
-    assert exam_stats._calibration("hard", None) is None
-
-
-def test_calibration_ignores_case_and_padding():
-
-    assert exam_stats._calibration("  HARD ", 96.0) == "easier_than_labelled"
+def test_percentiles_match_continuous_interpolation():
+    assert exam_stats._percentile([1, 2, 3, 4], .25) == 1.8
+    assert exam_stats._stats([1000, 2000, 3000], 1000) == {
+        "mean": 2.0, "median": 2.0, "p25": 1.5, "p75": 2.5, "sample_size": 3,
+    }
 
 
-def test_distribution_covers_every_score_exactly_once():
-    """Fifths are half-open so 60 lands above the pass mark, not below it."""
-
-    buckets = exam_stats._distribution([0, 19.9, 20, 40, 59.9, 60, 80, 99.9, 100])
-
-    #        0-20      20-40   40-60        60-80   80-100
-    #      0, 19.9 |      20 | 40, 59.9 |      60 | 80, 99.9, 100
-    assert [b["students"] for b in buckets] == [2, 1, 2, 1, 3]
-    assert sum(b["students"] for b in buckets) == 9
+def test_configured_difficulty_boundaries():
+    assert exam_stats._difficulty(80) == "easy"
+    assert exam_stats._difficulty(79.9) == "moderate"
+    assert exam_stats._difficulty(50) == "moderate"
+    assert exam_stats._difficulty(49.9) == "difficult"
+    assert exam_stats._difficulty(None) is None
 
 
-def test_distribution_puts_full_marks_in_the_top_bucket():
-    """100 must not fall off the end of a half-open range."""
-
-    buckets = exam_stats._distribution([100.0])
-
-    assert buckets[-1]["students"] == 1
-    assert sum(b["students"] for b in buckets) == 1
-
-
-def test_an_empty_cohort_distributes_to_nothing():
-
-    assert [b["students"] for b in exam_stats._distribution([])] == [0, 0, 0, 0, 0]
+def test_one_student_cohort_is_low_confidence_and_no_discrimination():
+    value, label, sample = exam_stats._discrimination(
+        {1: True}, {(1, 10): True, (1, 11): False}, 10, 2
+    )
+    assert (value, label, sample) == (None, "insufficient_data", 1)
+    assert exam_stats._confidence(1, 20, 2) == "LOW"
 
 
-# --- distractor analysis -------------------------------------------------
+def test_point_biserial_excludes_the_item_and_finds_good_discrimination():
+    item = {sid: sid >= 6 for sid in range(1, 11)}
+    all_results = {}
+    for sid in range(1, 11):
+        all_results[(sid, 10)] = item[sid]
+        all_results[(sid, 11)] = sid >= 6
+        all_results[(sid, 12)] = sid >= 6
+    value, label, sample = exam_stats._discrimination(item, all_results, 10, 3)
+    assert value == 1.0
+    assert label == "good"
+    assert sample == 10
 
 
-OPTIONS = ["A) Anterior and posterior", "B) Superior and inferior",
-           "C) Right and left", "D) Medial and lateral"]
+def test_negative_discrimination_is_neutral_review_signal():
+    item = {sid: sid <= 5 for sid in range(1, 11)}
+    results = {}
+    for sid in range(1, 11):
+        results[(sid, 10)] = item[sid]
+        results[(sid, 11)] = sid >= 6
+        results[(sid, 12)] = sid >= 6
+    value, label, _ = exam_stats._discrimination(item, results, 10, 3)
+    assert value == -1.0
+    assert label == "negative"
+    _, priority, reasons = exam_stats._priority(50, label, [], 0, 0, 5, 10)
+    assert priority == "MEDIUM"
+    assert any("review recommended" in reason for reason in reasons)
+    assert all("wrong" not in reason for reason in reasons)
 
 
-def test_option_letter_is_read_off_the_stored_text():
-    """Options are stored already lettered, so the letter comes from the text."""
-
-    assert exam_stats._option_letter("C) Right and left") == "C"
-    assert exam_stats._option_letter("  d. something ") == "D"
-    assert exam_stats._option_letter("A: first") == "A"
-    assert exam_stats._option_letter("no letter here") is None
-    assert exam_stats._option_letter("") is None
-    assert exam_stats._option_letter(None) is None
-
-
-def test_every_option_is_listed_even_when_nobody_picked_it():
-    """A distractor nobody touches means the question is really a 3-way choice."""
-
-    rows, total = exam_stats._distractors([("A", 4, 4), ("C", 2, 2)], "C", OPTIONS)
-
-    assert [r["option"] for r in rows] == ["A", "B", "C", "D"]
-    assert [r["picks"] for r in rows] == [4, 0, 2, 0]
-    assert total == 6
-    assert [r["is_correct"] for r in rows] == [False, False, True, False]
-    assert rows[0]["percent"] == 66.7
-
-
-def test_a_choice_matching_no_option_is_shown_not_dropped():
-    """A renumbered question, or a client sending something unexpected."""
-
-    rows, total = exam_stats._distractors([("C", 1, 1), ("Z", 2, 2)], "C", OPTIONS)
-
-    stray = [r for r in rows if r["option"] == "Z"]
-
-    assert len(stray) == 1
-    assert stray[0]["text"] is None
-    assert stray[0]["picks"] == 2
-    assert total == 3
-
-
-def test_no_recorded_choices_gives_an_empty_distribution_not_zeroes():
-    """Attempts predating the column must not read as "nobody chose anything"."""
-
-    rows, total = exam_stats._distractors([], "C", OPTIONS)
-
-    assert total == 0
-    assert all(r["picks"] == 0 for r in rows)
-    assert all(r["percent"] is None for r in rows)
-
-
-def test_a_dominant_distractor_is_reported():
-    """Half the class on one wrong option is a finding, not noise."""
-
-    rows, _ = exam_stats._distractors([("A", 4, 4), ("C", 2, 2), ("B", 2, 2)], "C", OPTIONS)
-
-    top = exam_stats._top_distractor(rows)
-
-    assert top["option"] == "A"
-    assert top["percent"] == 50.0
-
-
-def test_wrong_answers_spread_evenly_are_not_a_distractor_finding():
-    """Three distractors at 12% each is a hard question, not a broken one."""
-
-    rows, _ = exam_stats._distractors(
-        [("C", 13, 13), ("A", 2, 2), ("B", 2, 2), ("D", 2, 2)], "C", OPTIONS
+def test_zero_variance_returns_insufficient_data_instead_of_dividing_by_zero():
+    item = {sid: True for sid in range(1, 11)}
+    results = {(sid, qid): True for sid in range(1, 11) for qid in (10, 11)}
+    assert exam_stats._discrimination(item, results, 10, 2)[:2] == (
+        None, "insufficient_variance"
     )
 
-    assert exam_stats._top_distractor(rows) is None
+
+def test_non_functioning_and_misconception_inputs_affect_priority_deterministically():
+    options = [
+        {"classification": "non_functioning", "percent": 0, "order": 2},
+        {"classification": "strong_misconception", "percent": 50, "order": 3},
+    ]
+    score, category, reasons = exam_stats._priority(
+        25, "negative", options, 67, 10, 20, 15
+    )
+    assert score == 87.8
+    assert category == "HIGH"
+    assert "50.0% selected distractor 3" in reasons
+    assert "67.0% required retry" in reasons
 
 
-def test_a_perfect_question_has_no_top_distractor():
+def test_support_segmentation_is_not_score_only():
+    # A high score without question-level evidence is explicitly insufficient.
+    assert exam_stats._support(True, 100, None, None, None, [])[0] == "INCOMPLETE_OR_INSUFFICIENT"
+    assert exam_stats._support(False, 100, 100, 100, 0, [])[0] == "INCOMPLETE_OR_INSUFFICIENT"
+    assert exam_stats._support(True, 90, 90, 90, 0, [])[0] == "STRONG_PERFORMANCE"
+    assert exam_stats._support(True, 90, 90, 90, 60, [])[1] == "High retry dependency"
+    assert exam_stats._support(True, 70, 70, 70, 0, ["Anatomy"])[1] == "Weak topic: Anatomy"
 
-    rows, _ = exam_stats._distractors([("C", 6, 6)], "C", OPTIONS)
 
-    assert exam_stats._top_distractor(rows) is None
+def test_topic_evidence_thresholds_are_configured_in_one_place():
+    config = exam_stats.DEFAULT_CONFIG
+    assert config.min_topic_questions == 2
+    assert config.min_topic_attempts == 10
+    assert config.min_discrimination_students == 10
