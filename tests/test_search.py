@@ -1,5 +1,6 @@
 """Search assistant catalog boundary and safe SQL construction."""
 
+import logging
 import os
 import sys
 
@@ -26,6 +27,21 @@ def filt(table, column, op="ilike", value="", values=None, means=""):
         "table": table, "column": column, "op": op, "value": value,
         "values": values or [], "means": means,
     }
+
+
+def test_model_initialization_failure_is_returned_and_logged(monkeypatch, caplog):
+    def broken_model():
+        raise RuntimeError("missing AI configuration")
+
+    monkeypatch.setattr(extract_info, "ChatModel", broken_model)
+
+    with caplog.at_level(logging.ERROR):
+        result = extract_info.extract("find anatomy courses")
+
+    assert result["ok"] is False
+    assert result["plan"] is None
+    assert "RuntimeError" in result["error"]
+    assert "AI search planner failed" in caplog.text
 
 
 def test_only_requested_catalog_result_kinds_are_allowed():
