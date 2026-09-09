@@ -138,8 +138,71 @@ def test_missing_evidence_returns_safe_answer_without_answer_generation(rag, mon
     result = TutorService(SimpleNamespace(), model, settings(), Counter()).ask(
         None, "Unknown", video_id=7)
     assert result.grounded is False
-    assert result.answer == prompts.NOT_IN_LECTURE
+    assert result.answer == prompts.NOT_IN_LECTURE_EN
     assert len(model.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "question,expected_answer",
+    [
+        ("Is this topic covered?", prompts.NOT_IN_LECTURE_EN),
+        ("هل هذا الموضوع مذكور في المحاضرة؟", prompts.NOT_IN_LECTURE_AR),
+        ("هو الدكتور شرح النقطة دي إزاي؟", prompts.NOT_IN_LECTURE),
+    ],
+)
+def test_no_evidence_fallback_uses_the_students_language(
+    rag, monkeypatch, question, expected_answer
+):
+    monkeypatch.setattr(
+        "app.services.tutor.retrieval.search", lambda *args, **kwargs: []
+    )
+    model = Model([
+        generated(prompts.StandaloneQueryReply(standalone_query=question))
+    ])
+
+    result = TutorService(
+        SimpleNamespace(), model, settings(), Counter()
+    ).ask(None, question, video_id=7)
+
+    assert result.answer == expected_answer
+
+
+def test_non_answer_notices_are_localized_from_the_latest_question():
+    assert prompts.cross_video_notice("Where was this covered?").startswith("This")
+    assert prompts.cross_video_notice("ده اتشرح فين؟").startswith("الإجابة دي")
+    assert prompts.cross_video_notice("أين شُرح هذا؟").startswith("هذه الإجابة")
+    assert "temporarily unavailable" in prompts.assistant_unavailable_notice(
+        "Can I watch the relevant segment?"
+    )
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "How does the humerus develop?",
+        "كيف يتطور عظم العضد؟",
+        "عظمة الـ humerus بتتكوّن إزاي؟",
+    ],
+)
+def test_answer_prompt_mirrors_latest_question_language_and_arabic_dialect(
+    rag, question
+):
+    model = Model([
+        generated(prompts.StandaloneQueryReply(standalone_query=question)),
+        generated(prompts.TutorReply(
+            found=True, answer="Grounded answer [1]", used_excerpts=[1]
+        )),
+    ])
+
+    TutorService(SimpleNamespace(), model, settings(), Counter()).ask(
+        None, question, video_id=7
+    )
+
+    answer_call = model.calls[1]
+    assert "LATEST ORIGINAL QUESTION" in answer_call["system_instruction"]
+    assert "Never default every" in answer_call["system_instruction"]
+    assert "Arabic dialect" in answer_call["user_prompt"]
+    assert f"Original student question: {question}" in answer_call["user_prompt"]
 
 
 def test_missing_current_video_evidence_falls_back_to_same_course(monkeypatch):
