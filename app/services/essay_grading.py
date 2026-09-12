@@ -45,6 +45,13 @@ def provider_response_schema(schema):
     nested definitions. The provider gets the supported structural subset; its
     response is still parsed afterward by the original strict Pydantic model.
 
+    ``exclusiveMinimum`` and ``exclusiveMaximum`` are rejected too, and their
+    removal is the same trade: the bound is still enforced by the strict model
+    on the way back in, which is the only place it decides anything. Leaving
+    ``exclusiveMinimum`` in — from a ``weight`` field declared ``gt=0`` —
+    made Gemini refuse the whole schema, and every criteria generation came
+    back as "malformed structured response" naming nothing.
+
     ``maxItems`` is rejected the same way, and it is worth saying why this was
     not obvious: every test here fakes the LLM, so the schema was never sent to
     Gemini in CI. Against the live API it produced a bare
@@ -61,6 +68,8 @@ def provider_response_schema(schema):
             value.pop("additionalProperties", None)
             value.pop("additional_properties", None)
             value.pop("maxItems", None)
+            value.pop("exclusiveMinimum", None)
+            value.pop("exclusiveMaximum", None)
             for child in value.values():
                 strip_unsupported(child)
         elif isinstance(value, list):
