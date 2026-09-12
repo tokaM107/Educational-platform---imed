@@ -70,7 +70,8 @@ class EvaluationItem(BaseModel):
     question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
     student_answer: str = Field(max_length=MAX_ANSWER_CHARS)
     max_score: Decimal = Field(gt=0, le=1000)
-    # Required. There is no branch here that generates them.
+    # Required, and carrying the teacher's own mark allocation when they have
+    # set one. There is no branch here that generates them.
     criteria: list[Criterion] = Field(min_length=1, max_length=MAX_CRITERIA)
     criteria_hash: str | None = Field(default=None, max_length=128)
 

@@ -231,3 +231,83 @@ def test_provider_schema_drops_keywords_gemini_rejects():
 
     # The bound is still enforced locally, which is where it matters.
     assert "maxItems" in json.dumps(AnswerEvaluationResult.model_json_schema())
+
+
+def _evaluation(*statuses):
+    from app.schemas.essay_grading import (
+        AnswerEvaluationResult, CriterionEvaluation, EvaluationStatus,
+    )
+
+    return AnswerEvaluationResult(
+        results=[
+            CriterionEvaluation(
+                criterion_id=f"C{i + 1}", status=EvaluationStatus(s), reason="r",
+            )
+            for i, s in enumerate(statuses)
+        ],
+        needs_review=False,
+    )
+
+
+def test_teacher_marks_weight_the_score():
+    """A criterion the teacher made worth 2 of 5 must score as 2, not as a third.
+
+    This is the whole point of letting a teacher allocate marks: three criteria
+    over five marks are 2/2/1 if that is what the teacher decided, and an equal
+    split would quietly overrule them.
+    """
+
+    from decimal import Decimal
+
+    from app.schemas.essay_grading import Criterion
+    from app.services.essay_scoring import calculate_score
+
+    criteria = [
+        Criterion(id="C1", claim="a", marks=Decimal("2")),
+        Criterion(id="C2", claim="b", marks=Decimal("2")),
+        Criterion(id="C3", claim="c", marks=Decimal("1")),
+    ]
+    # Only the 2-mark criterion is met.
+    scoring = calculate_score(criteria, _evaluation("yes", "no", "no"), Decimal("5"))
+    assert Decimal(scoring.score) == Decimal("2.00")
+
+    # The 1-mark one alone.
+    scoring = calculate_score(criteria, _evaluation("no", "no", "yes"), Decimal("5"))
+    assert Decimal(scoring.score) == Decimal("1.00")
+
+    # Partial credit halves the criterion's own allocation, not an average.
+    scoring = calculate_score(criteria, _evaluation("partial", "no", "no"), Decimal("5"))
+    assert Decimal(scoring.score) == Decimal("1.00")
+
+    scoring = calculate_score(criteria, _evaluation("yes", "yes", "yes"), Decimal("5"))
+    assert Decimal(scoring.score) == Decimal("5.00")
+
+
+def test_unallocated_criteria_still_split_evenly():
+    """A proposal a teacher has not weighted yet keeps the old behaviour."""
+
+    from decimal import Decimal
+
+    from app.schemas.essay_grading import Criterion
+    from app.services.essay_scoring import calculate_score
+
+    criteria = [Criterion(id=f"C{i + 1}", claim="x") for i in range(4)]
+    scoring = calculate_score(criteria, _evaluation("yes", "yes", "no", "no"), Decimal("8"))
+    assert Decimal(scoring.score) == Decimal("4.00")
+
+
+def test_partial_allocation_falls_back_rather_than_guessing():
+    """Some marks set and some missing is not an allocation to trust."""
+
+    from decimal import Decimal
+
+    from app.schemas.essay_grading import Criterion
+    from app.services.essay_scoring import calculate_score
+
+    criteria = [
+        Criterion(id="C1", claim="a", marks=Decimal("4")),
+        Criterion(id="C2", claim="b"),
+    ]
+    scoring = calculate_score(criteria, _evaluation("yes", "no"), Decimal("6"))
+    # Equal split: 3 of 6, not the 4 the lone allocation would have given.
+    assert Decimal(scoring.score) == Decimal("3.00")

@@ -18,6 +18,15 @@ class StrictLLMModel(BaseModel):
 class Criterion(StrictLLMModel):
     id: str = Field(pattern=r"^C[1-9][0-9]*$")
     claim: str = Field(min_length=1, max_length=2_000)
+    # The teacher's own allocation for this criterion, when the caller has one.
+    #
+    # Absent on anything the model produces: a criteria proposal says what a
+    # full answer should contain, not what it is worth. The marks are the
+    # teacher's to set, and they arrive here only on the evaluation request, so
+    # the deterministic scorer can weight by them. They are never put in a
+    # prompt - the model judges whether a claim was met, and how much that is
+    # worth is not its business.
+    marks: Decimal | None = Field(default=None, ge=0, le=1000)
 
 
 class CriteriaGenerationResult(StrictLLMModel):

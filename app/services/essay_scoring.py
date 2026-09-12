@@ -56,11 +56,26 @@ def calculate_score(
         raise ValueError("max_points must be positive")
 
     by_id = {result.criterion_id: result for result in evaluation.results}
-    weight = maximum / Decimal(len(criteria))
+
+    # Weighting, and which one applies.
+    #
+    # When every criterion carries the teacher's own allocation, that is what
+    # the mark is built from -- the teacher owns the rubric, and a criterion
+    # they chose to make worth 2 of 5 must not be scored as worth 1.67 because
+    # there happen to be three of them. The equal split stays for callers with
+    # no allocation to give, which is what the grading prototype has always
+    # been and what a freshly generated proposal is before a teacher reviews
+    # it. Mixed or partial allocations fall back rather than guessing at the
+    # missing ones.
+    allocations = [c.marks for c in criteria]
+    weighted = all(m is not None for m in allocations)
+    equal_weight = maximum / Decimal(len(criteria))
+
     total = Decimal("0")
     breakdown = []
     for criterion in criteria:
         result = by_id[criterion.id]
+        weight = Decimal(criterion.marks) if weighted else equal_weight
         awarded = weight * STATUS_FACTORS[result.status.value]
         total += awarded
         breakdown.append(ScoreContribution(
