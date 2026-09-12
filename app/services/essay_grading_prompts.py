@@ -5,7 +5,7 @@ import json
 from app.schemas.essay_grading import Criterion
 
 
-CRITERIA_PROMPT_VERSION = "essay-criteria-v1"
+CRITERIA_PROMPT_VERSION = "essay-criteria-v2"
 EVALUATOR_PROMPT_VERSION = "essay-evaluator-v1"
 
 CRITERIA_SYSTEM_INSTRUCTION = """\
@@ -15,7 +15,13 @@ into small, independently gradable criteria.
 
 Rules:
 - Use only information explicitly present in the model answer. Add no external facts.
-- Do not calculate, assign, mention, or suggest points or a numerical score.
+- Do not calculate, assign, mention, or suggest points, marks, or a numerical score.
+- Give every criterion a `weight`: how important it is relative to the others,
+  as a share of 1. Weights must all be greater than 0 and must sum to 1.0.
+  Weight is relative importance, NOT marks — you are never told the question's
+  total and must not guess it.
+- A criterion that would be worth nothing does not belong in the rubric at all;
+  leave it out rather than giving it weight 0.
 - Produce atomic criteria that can be evaluated independently, in model-answer order.
 - Use IDs C1, C2, C3, ... exactly once each, with no gaps.
 - Avoid duplicate or heavily overlapping criteria.
@@ -75,7 +81,7 @@ def build_evaluator_prompt(
             # business. Telling it the weights invites it to grade the total
             # rather than the claim.
             "criteria": [
-                criterion.model_dump(exclude={"marks"}) for criterion in criteria
+                criterion.model_dump(exclude={"marks", "weight"}) for criterion in criteria
             ],
             "student_answer": student_answer,
         },

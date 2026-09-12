@@ -21,9 +21,24 @@ from app.schemas.essay_grading import (
 from app.services.essay_grading import GradingStageError
 
 KEY = "x" * 40
+def wire(criteria):
+    """Criteria as they travel on the wire: plain JSON numbers.
+
+    `model_dump()` keeps Decimals, which httpx cannot serialize — and neither
+    can any real caller, which is the point. Nest sends numbers.
+    """
+
+    return [
+        {**c.model_dump(), "weight": float(c.weight) if c.weight is not None else None}
+        for c in criteria
+    ]
+
+
 CRITERIA = [
-    Criterion(id="C1", claim="يذكر انقباض البطينين"),
-    Criterion(id="C2", claim="يذكر انبساط البطينين"),
+    # Weights, not marks: the generator proposes relative importance and the
+    # caller turns it into marks against the question's own total.
+    Criterion(id="C1", claim="يذكر انقباض البطينين", weight=Decimal("0.6")),
+    Criterion(id="C2", claim="يذكر انبساط البطينين", weight=Decimal("0.4")),
 ]
 
 
@@ -90,7 +105,7 @@ def criteria_body(**over):
 
 def evaluate_body(answer="الانقباض ثم الانبساط", **over):
     item = {"reference": "q1", "question": "اشرح دورة القلب", "student_answer": answer,
-            "max_score": "5", "criteria": [c.model_dump() for c in CRITERIA],
+            "max_score": "5", "criteria": wire(CRITERIA),
             "criteria_hash": "abc123"}
     item.update(over.pop("item", {}))
     return {"attempt_id": 1, "items": [item], **over}
@@ -266,7 +281,7 @@ def test_evaluation_timeout_does_not_become_zero(monkeypatch):
 def test_several_essays_evaluate_concurrently(monkeypatch):
     install(monkeypatch, FakeService(delay=0.2))
     items = [{"reference": f"q{i}", "question": "س", "student_answer": "ج", "max_score": "5",
-              "criteria": [c.model_dump() for c in CRITERIA], "criteria_hash": "h"}
+              "criteria": wire(CRITERIA), "criteria_hash": "h"}
              for i in range(4)]
     with TestClient(app) as client:
         res = post(client, "/evaluate", {"attempt_id": 7, "items": items})

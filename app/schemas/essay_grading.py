@@ -9,6 +9,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 MAX_QUESTION_CHARS = 10_000
 MAX_ANSWER_CHARS = 50_000
 MAX_CRITERIA = 50
+# How far the weights may drift from 1 before the rubric is rejected.
+#
+# Wide enough for the rounding a model does when it writes 0.33 three times,
+# narrow enough that a rubric which genuinely does not add up is refused.
+WEIGHT_SUM_TOLERANCE = Decimal("0.02")
 
 
 class StrictLLMModel(BaseModel):
@@ -33,6 +38,18 @@ class Criterion(StrictLLMModel):
     # an int and no client would think to send a Decimal. Strictness here
     # rejected every real evaluation request with the marks attached.
     marks: Decimal | None = Field(default=None, ge=0, le=1000, strict=False)
+    # How much of the question this criterion is worth, as a share of 1.
+    #
+    # The model proposes RELATIVE IMPORTANCE, never marks. Asked for marks it
+    # would be inventing a mark scheme; asked which parts matter more, it is
+    # doing the thing it can actually do, and the marks fall out of the
+    # question's own total by arithmetic the caller performs. So a 5-mark
+    # question with weights 0.4/0.35/0.25 becomes 2/1.75/1.25 deterministically.
+    #
+    # Zero is rejected rather than allowed: a criterion worth nothing is not a
+    # criterion, and a rubric containing one would grade an answer against a
+    # standard that cannot affect its mark.
+    weight: Decimal | None = Field(default=None, gt=0, le=1, strict=False)
 
 
 class CriteriaGenerationResult(StrictLLMModel):
@@ -46,6 +63,35 @@ class CriteriaGenerationResult(StrictLLMModel):
         ids = [criterion.id for criterion in criteria]
         if len(ids) != len(set(ids)):
             raise ValueError("criterion IDs must be unique")
+        return criteria
+
+    @field_validator("criteria")
+    @classmethod
+    def normalized_weights(cls, criteria):
+        """Every criterion carries a positive weight, and they sum to one.
+
+        Rejected rather than repaired. Silently normalizing a model that
+        returned 0.4/0.4/0.4 would publish a mark scheme nobody chose, and one
+        that returned a zero would hide a criterion that cannot affect the
+        mark. The caller retries or the teacher writes the rubric; both are
+        better than a plausible invention.
+
+        The tolerance exists because the model returns decimals and three
+        thirds do not sum to exactly one in any finite representation. It is
+        deliberately tight: this catches representation error, not a model
+        that did not add up.
+        """
+
+        missing = [criterion.id for criterion in criteria if criterion.weight is None]
+        if missing:
+            raise ValueError(
+                f"every criterion needs a weight; missing: {', '.join(missing)}"
+            )
+
+        total = sum(criterion.weight for criterion in criteria)
+        if abs(total - Decimal("1")) > WEIGHT_SUM_TOLERANCE:
+            raise ValueError(f"criterion weights must sum to 1, got {total}")
+
         return criteria
 
 

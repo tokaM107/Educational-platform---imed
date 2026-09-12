@@ -56,7 +56,7 @@ def evaluation(rows, needs_review=False):
 @pytest.mark.anyio
 async def test_criteria_generator_parses_structured_output_and_uses_zero_temperature():
     llm = FakeLLM([{
-        "criteria": [{"id": "C1", "claim": "Insulin lowers glucose"}],
+        "criteria": [{"id": "C1", "claim": "Insulin lowers glucose", "weight": 1}],
         "needs_review": False,
         "review_reason": None,
     }])
@@ -194,7 +194,7 @@ def test_needs_review_preserves_a_provisional_score():
 @pytest.mark.anyio
 async def test_grading_failure_has_no_finalized_score_for_missing_result():
     llm = FakeLLM([
-        {"criteria": [{"id": "C1", "claim": "one"}], "needs_review": False, "review_reason": None},
+        {"criteria": [{"id": "C1", "claim": "one", "weight": 1}], "needs_review": False, "review_reason": None},
         {"results": [], "needs_review": False, "review_reason": None},
     ])
     result = await EssayGradingService(settings(), llm).grade(
@@ -344,3 +344,94 @@ def test_the_evaluator_prompt_never_carries_the_teacher_marks():
     assert "ادعاء" in prompt
     assert "marks" not in prompt
     assert "3" not in prompt
+
+
+def test_criteria_weights_must_be_positive_and_sum_to_one():
+    """The rubric contract: relative importance, all of it allocated.
+
+    Rejected rather than repaired. Normalizing a model that returned
+    0.4/0.4/0.4 would publish a mark scheme nobody chose.
+    """
+    valid = CriteriaGenerationResult.model_validate(
+        {
+            "criteria": [
+                {"id": "C1", "claim": "one", "weight": 0.4},
+                {"id": "C2", "claim": "two", "weight": 0.35},
+                {"id": "C3", "claim": "three", "weight": 0.25},
+            ],
+            "needs_review": False,
+            "review_reason": None,
+        }
+    )
+
+    assert sum(c.weight for c in valid.criteria) == Decimal("1.00")
+
+
+@pytest.mark.parametrize(
+    ("criteria", "reason"),
+    [
+        ([{"id": "C1", "claim": "a", "weight": 0.5}], "sum below one"),
+        (
+            [{"id": "C1", "claim": "a", "weight": 0.7}, {"id": "C2", "claim": "b", "weight": 0.7}],
+            "sum above one",
+        ),
+        (
+            [{"id": "C1", "claim": "a", "weight": 0}, {"id": "C2", "claim": "b", "weight": 1}],
+            "a criterion worth nothing is not a criterion",
+        ),
+        ([{"id": "C1", "claim": "a"}], "no weight at all"),
+    ],
+)
+def test_invalid_criteria_weights_are_rejected(criteria, reason):
+    with pytest.raises(ValidationError):
+        CriteriaGenerationResult.model_validate(
+            {"criteria": criteria, "needs_review": False, "review_reason": None}
+        )
+
+
+def test_rounding_slack_in_thirds_is_tolerated():
+    """Three thirds do not sum to one in any finite representation.
+
+    The tolerance is for that, not for a model that did not add up.
+    """
+    result = CriteriaGenerationResult.model_validate(
+        {
+            "criteria": [
+                {"id": "C1", "claim": "a", "weight": 0.33},
+                {"id": "C2", "claim": "b", "weight": 0.33},
+                {"id": "C3", "claim": "c", "weight": 0.34},
+            ],
+            "needs_review": False,
+            "review_reason": None,
+        }
+    )
+
+    assert len(result.criteria) == 3
+
+
+def test_weights_derive_marks_that_sum_to_the_question_total():
+    """0.4 / 0.35 / 0.25 of five marks is 2 / 1.75 / 1.25, and that is exactly five.
+
+    Fractional marks are the normal case once weights are involved, so the
+    arithmetic is Decimal rather than float.
+    """
+    weights = [Decimal("0.4"), Decimal("0.35"), Decimal("0.25")]
+    total = Decimal("5")
+    marks = [w * total for w in weights]
+
+    assert marks == [Decimal("2.0"), Decimal("1.75"), Decimal("1.25")]
+    assert sum(marks) == total
+
+
+def test_the_evaluator_prompt_carries_neither_marks_nor_weights():
+    """The evaluator decides fulfilment; what it is worth is not its business."""
+    prompt = build_evaluator_prompt(
+        "سؤال",
+        [Criterion(id="C1", claim="ادعاء", marks=Decimal("3"), weight=Decimal("0.6"))],
+        "إجابة",
+    )
+
+    assert "ادعاء" in prompt
+    assert "marks" not in prompt
+    assert "weight" not in prompt
+    assert "0.6" not in prompt
