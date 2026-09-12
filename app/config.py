@@ -286,6 +286,19 @@ class Settings:
         # every request rather than trusting the internet.
         self.bunny_webhook_secret = env("BUNNY_WEBHOOK_SECRET", "")
 
+        # --- Service-to-service ---
+        #
+        # The shared secret NestJS presents when it asks this service to grade
+        # an exam attempt. That call carries no end user: a background worker
+        # grades an attempt after the student has gone, so there is no token to
+        # forward and nothing for `get_current_user` to resolve.
+        #
+        # Unset means the internal endpoint refuses every request. It is the
+        # same stance as `bunny_webhook_secret` above and for the same reason —
+        # an unauthenticated grader would let anyone on the internet write
+        # marks into the database.
+        self.internal_api_key = env("INTERNAL_API_KEY", "")
+
         # --- Transcription ---
         #
         # Which ASR the worker uses.
@@ -396,6 +409,15 @@ class Settings:
             raise RuntimeError("NEST_JWT_ACCESS_SECRET must be at least 32 characters")
 
         return self.nest_jwt_access_secret
+
+    def require_internal_api_key(self):
+        """The service-to-service secret, or a 500 that names what is missing."""
+
+        if not self.internal_api_key:
+            raise RuntimeError("INTERNAL_API_KEY is not configured")
+        if len(self.internal_api_key) < 32:
+            raise RuntimeError("INTERNAL_API_KEY must be at least 32 characters")
+        return self.internal_api_key
 
     def require_bunny_webhook_secret(self):
 

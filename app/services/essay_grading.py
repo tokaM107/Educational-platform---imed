@@ -44,6 +44,14 @@ def provider_response_schema(schema):
     Gemini Developer API's OpenAPI subset rejects that keyword, including in
     nested definitions. The provider gets the supported structural subset; its
     response is still parsed afterward by the original strict Pydantic model.
+
+    ``maxItems`` is rejected the same way, and it is worth saying why this was
+    not obvious: every test here fakes the LLM, so the schema was never sent to
+    Gemini in CI. Against the live API it produced a bare
+    ``400 INVALID_ARGUMENT`` on EVERY essay evaluation - the whole feature was
+    dead on arrival and the failure named nothing. Removing the keyword costs
+    no validation: the bound is still enforced when the reply is parsed back
+    into the strict model, which is the only place it was ever load-bearing.
     """
 
     provider_schema = copy.deepcopy(schema.model_json_schema())
@@ -52,6 +60,7 @@ def provider_response_schema(schema):
         if isinstance(value, dict):
             value.pop("additionalProperties", None)
             value.pop("additional_properties", None)
+            value.pop("maxItems", None)
             for child in value.values():
                 strip_unsupported(child)
         elif isinstance(value, list):

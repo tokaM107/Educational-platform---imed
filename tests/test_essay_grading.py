@@ -9,6 +9,7 @@ from app.schemas.essay_grading import (
 )
 from app.services import essay_scoring
 from app.services.essay_grading import EssayGradingService, provider_response_schema
+from app.services.essay_grading_prompts import build_evaluator_prompt
 from app.services.essay_scoring import IncompleteEvaluation, calculate_score
 from app.services.llm import GeneratedReply
 
@@ -209,3 +210,137 @@ def test_dataset_has_exactly_ten_questions_and_four_cases_each():
     assert dataset["fixture_type"] == "synthetic_engineering_evaluation"
     assert len(dataset["questions"]) == 10
     assert all(len(question["student_answers"]) >= 4 for question in dataset["questions"])
+
+
+def test_provider_schema_drops_keywords_gemini_rejects():
+    """The provider subset must not carry `maxItems` or `additionalProperties`.
+
+    Both produce a bare 400 INVALID_ARGUMENT from the Gemini Developer API, and
+    because every other test here fakes the LLM, nothing else would notice: the
+    schema is only rejected when it actually reaches the provider.
+    """
+
+    import json
+
+    from app.schemas.essay_grading import AnswerEvaluationResult, CriteriaGenerationResult
+    from app.services.essay_grading import provider_response_schema
+
+    for model in (AnswerEvaluationResult, CriteriaGenerationResult):
+        rendered = json.dumps(provider_response_schema(model))
+        assert "maxItems" not in rendered
+        assert "additionalProperties" not in rendered
+
+    # The bound is still enforced locally, which is where it matters.
+    assert "maxItems" in json.dumps(AnswerEvaluationResult.model_json_schema())
+
+
+def _evaluation(*statuses):
+    from app.schemas.essay_grading import (
+        AnswerEvaluationResult, CriterionEvaluation, EvaluationStatus,
+    )
+
+    return AnswerEvaluationResult(
+        results=[
+            CriterionEvaluation(
+                criterion_id=f"C{i + 1}", status=EvaluationStatus(s), reason="r",
+            )
+            for i, s in enumerate(statuses)
+        ],
+        needs_review=False,
+    )
+
+
+def test_teacher_marks_weight_the_score():
+    """A criterion the teacher made worth 2 of 5 must score as 2, not as a third.
+
+    This is the whole point of letting a teacher allocate marks: three criteria
+    over five marks are 2/2/1 if that is what the teacher decided, and an equal
+    split would quietly overrule them.
+    """
+
+    from decimal import Decimal
+
+    from app.schemas.essay_grading import Criterion
+    from app.services.essay_scoring import calculate_score
+
+    criteria = [
+        Criterion(id="C1", claim="a", marks=Decimal("2")),
+        Criterion(id="C2", claim="b", marks=Decimal("2")),
+        Criterion(id="C3", claim="c", marks=Decimal("1")),
+    ]
+    # Only the 2-mark criterion is met.
+    scoring = calculate_score(criteria, _evaluation("yes", "no", "no"), Decimal("5"))
+    assert Decimal(scoring.score) == Decimal("2.00")
+
+    # The 1-mark one alone.
+    scoring = calculate_score(criteria, _evaluation("no", "no", "yes"), Decimal("5"))
+    assert Decimal(scoring.score) == Decimal("1.00")
+
+    # Partial credit halves the criterion's own allocation, not an average.
+    scoring = calculate_score(criteria, _evaluation("partial", "no", "no"), Decimal("5"))
+    assert Decimal(scoring.score) == Decimal("1.00")
+
+    scoring = calculate_score(criteria, _evaluation("yes", "yes", "yes"), Decimal("5"))
+    assert Decimal(scoring.score) == Decimal("5.00")
+
+
+def test_unallocated_criteria_still_split_evenly():
+    """A proposal a teacher has not weighted yet keeps the old behaviour."""
+
+    from decimal import Decimal
+
+    from app.schemas.essay_grading import Criterion
+    from app.services.essay_scoring import calculate_score
+
+    criteria = [Criterion(id=f"C{i + 1}", claim="x") for i in range(4)]
+    scoring = calculate_score(criteria, _evaluation("yes", "yes", "no", "no"), Decimal("8"))
+    assert Decimal(scoring.score) == Decimal("4.00")
+
+
+def test_partial_allocation_falls_back_rather_than_guessing():
+    """Some marks set and some missing is not an allocation to trust."""
+
+    from decimal import Decimal
+
+    from app.schemas.essay_grading import Criterion
+    from app.services.essay_scoring import calculate_score
+
+    criteria = [
+        Criterion(id="C1", claim="a", marks=Decimal("4")),
+        Criterion(id="C2", claim="b"),
+    ]
+    scoring = calculate_score(criteria, _evaluation("yes", "no"), Decimal("6"))
+    # Equal split: 3 of 6, not the 4 the lone allocation would have given.
+    assert Decimal(scoring.score) == Decimal("3.00")
+
+
+def test_marks_accept_a_plain_json_number():
+    """The wire sends `2`, not `Decimal("2")`, and that must be accepted.
+
+    The enclosing model is strict because it also parses LLM output, where a
+    string where a number belongs is a malformed answer worth rejecting. But
+    `marks` never comes from the model -- it arrives as ordinary JSON from the
+    backend, and strictness there rejected every real evaluation request that
+    carried the teacher's allocation, with a 422 the caller read as "the
+    grading service is down".
+    """
+    criterion = Criterion.model_validate({"id": "C1", "claim": "شيء", "marks": 2})
+
+    assert criterion.marks == Decimal("2")
+
+
+def test_the_evaluator_prompt_never_carries_the_teacher_marks():
+    """The model judges whether a claim was met, not what it is worth.
+
+    Telling it the weights invites it to grade toward a total rather than
+    against the claim, and the allocation is the teacher's decision either way.
+    """
+    prompt = build_evaluator_prompt(
+        "سؤال",
+        [Criterion(id="C1", claim="ادعاء", marks=Decimal("3"))],
+        "إجابة",
+    )
+
+    assert "ادعاء" in prompt
+    assert "marks" not in prompt
+    assert "3" not in prompt
