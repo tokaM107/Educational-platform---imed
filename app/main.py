@@ -15,7 +15,7 @@ from psycopg_pool import PoolTimeout
 
 from app.api import (auth, chat, checkpoints, events, exams, lectures, notifications,
                      questions, reports, search, subscriptions, transcriptions,
-                     videos, webhooks)
+                     videos, webhooks, exam_grading,)
 from app.config import get_settings
 from app.db import close_pool, open_pool
 
@@ -89,6 +89,7 @@ app.include_router(questions.router)
 app.include_router(reports.router)
 app.include_router(notifications.router)
 app.include_router(exams.router)
+app.include_router(exam_grading.router)
 app.include_router(subscriptions.router)
 app.include_router(search.router)
 app.include_router(webhooks.router)
