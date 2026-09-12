@@ -209,3 +209,25 @@ def test_dataset_has_exactly_ten_questions_and_four_cases_each():
     assert dataset["fixture_type"] == "synthetic_engineering_evaluation"
     assert len(dataset["questions"]) == 10
     assert all(len(question["student_answers"]) >= 4 for question in dataset["questions"])
+
+
+def test_provider_schema_drops_keywords_gemini_rejects():
+    """The provider subset must not carry `maxItems` or `additionalProperties`.
+
+    Both produce a bare 400 INVALID_ARGUMENT from the Gemini Developer API, and
+    because every other test here fakes the LLM, nothing else would notice: the
+    schema is only rejected when it actually reaches the provider.
+    """
+
+    import json
+
+    from app.schemas.essay_grading import AnswerEvaluationResult, CriteriaGenerationResult
+    from app.services.essay_grading import provider_response_schema
+
+    for model in (AnswerEvaluationResult, CriteriaGenerationResult):
+        rendered = json.dumps(provider_response_schema(model))
+        assert "maxItems" not in rendered
+        assert "additionalProperties" not in rendered
+
+    # The bound is still enforced locally, which is where it matters.
+    assert "maxItems" in json.dumps(AnswerEvaluationResult.model_json_schema())
