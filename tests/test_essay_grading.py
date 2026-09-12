@@ -82,7 +82,7 @@ def test_provider_schema_removes_unsupported_additional_properties_recursively()
     assert "additionalProperties" not in set(keys(schema))
     assert "additional_properties" not in set(keys(schema))
     assert schema["properties"]["criteria"]["items"]["$ref"] == (
-        "#/$defs/Criterion"
+        "#/$defs/ProposedCriterion"
     )
 
 
@@ -120,7 +120,8 @@ def test_duplicate_criterion_ids_are_rejected():
     with pytest.raises(ValidationError, match="criterion IDs must be unique"):
         CriteriaGenerationResult.model_validate_json("""{
           "criteria": [
-            {"id":"C1","claim":"one"}, {"id":"C1","claim":"two"}
+            {"id":"C1","claim":"one","weight":0.5},
+            {"id":"C1","claim":"two","weight":0.5}
           ], "needs_review":false, "review_reason":null
         }""", strict=True)
 

@@ -52,8 +52,29 @@ class Criterion(StrictLLMModel):
     weight: Decimal | None = Field(default=None, gt=0, le=1, strict=False)
 
 
+class ProposedCriterion(StrictLLMModel):
+    """One criterion as the MODEL must return it.
+
+    Separate from `Criterion` on purpose. `Criterion` is the wire shape a
+    caller sends for evaluation, where `weight` is optional because a rubric
+    written before weights existed does not have one. Here it is REQUIRED and
+    non-nullable, because the provider schema is generated from this class and
+    an optional field with a default is a field the model is entitled to omit
+    — which is exactly what it did, and every generation failed validation as
+    a "malformed structured response".
+    """
+
+    id: str = Field(pattern=r"^C[1-9][0-9]*$")
+    claim: str = Field(min_length=1, max_length=2_000)
+    # Relative importance, a share of 1. A plain float rather than a Decimal:
+    # this one is generated into a JSON schema the provider reads, and a
+    # Decimal renders as a string-or-number union the model has to choose
+    # between. The share is converted to Decimal for arithmetic downstream.
+    weight: float = Field(gt=0, le=1)
+
+
 class CriteriaGenerationResult(StrictLLMModel):
-    criteria: list[Criterion] = Field(min_length=1, max_length=MAX_CRITERIA)
+    criteria: list[ProposedCriterion] = Field(min_length=1, max_length=MAX_CRITERIA)
     needs_review: bool
     review_reason: str | None = Field(default=None, max_length=1_000)
 
@@ -82,13 +103,7 @@ class CriteriaGenerationResult(StrictLLMModel):
         that did not add up.
         """
 
-        missing = [criterion.id for criterion in criteria if criterion.weight is None]
-        if missing:
-            raise ValueError(
-                f"every criterion needs a weight; missing: {', '.join(missing)}"
-            )
-
-        total = sum(criterion.weight for criterion in criteria)
+        total = sum(Decimal(str(criterion.weight)) for criterion in criteria)
         if abs(total - Decimal("1")) > WEIGHT_SUM_TOLERANCE:
             raise ValueError(f"criterion weights must sum to 1, got {total}")
 

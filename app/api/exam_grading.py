@@ -24,6 +24,7 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 
 from app.config import get_settings
+
 from app.schemas.essay_grading import Criterion
 from app.schemas.exam_grading import (
     CriteriaRequest, CriteriaResponse, EvaluationItem, EvaluationRequest,
@@ -129,7 +130,14 @@ async def generate_criteria(data: CriteriaRequest) -> CriteriaResponse:
         )
 
     parsed = output.parsed
-    criteria = list(parsed.criteria)
+    # The model returns `ProposedCriterion` — a required weight and no marks.
+    # The wire shape is `Criterion`, where the weight is a Decimal so the
+    # caller's marks arithmetic stays exact. Marks are deliberately absent:
+    # only the caller knows the question's total.
+    criteria = [
+        Criterion(id=item.id, claim=item.claim, weight=Decimal(str(item.weight)))
+        for item in parsed.criteria
+    ]
     if not criteria:
         return CriteriaResponse(
             status="failed", elapsed_ms=int((time.monotonic() - started) * 1000),

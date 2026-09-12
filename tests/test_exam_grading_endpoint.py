@@ -16,6 +16,7 @@ from app.config import get_settings
 from app.main import app
 from app.schemas.essay_grading import (
     AnswerEvaluationResult, CriteriaGenerationResult, Criterion, CriterionEvaluation,
+    ProposedCriterion,
     EvaluationStatus,
 )
 from app.services.essay_grading import GradingStageError
@@ -71,8 +72,15 @@ class FakeService:
             raise self.raises
         if self.delay:
             await asyncio.sleep(self.delay)
+        # The generator returns ProposedCriterion — weight required, no marks.
+        # The endpoint maps those onto the wire `Criterion` shape.
         return stage(CriteriaGenerationResult(
-            criteria=self._criteria, needs_review=False, review_reason=None,
+            criteria=[
+                ProposedCriterion(id=c.id, claim=c.claim, weight=float(c.weight or 0))
+                for c in self._criteria
+            ],
+            needs_review=False,
+            review_reason=None,
         ))
 
     async def evaluate_student_answer(self, question, criteria, student_answer):
