@@ -1,17 +1,22 @@
-"""Internal endpoint: grade every essay answer on one exam attempt.
+"""Internal exam-grading endpoints: criteria at publish, evaluation at submit.
 
-Not reachable by a student, and not by a signed-in user at all. NestJS calls
-this from a background worker after an attempt is submitted, so there is no
-request-scoped user to authorise — the caller proves itself with the shared
-`INTERNAL_API_KEY` instead. That is also the point: a student must never be
-able to ask for a grade, because the answer would be a score.
+Neither is reachable by a student, or by a signed-in user at all. NestJS calls
+both with the shared `INTERNAL_API_KEY`: criteria generation happens while a
+teacher publishes, and evaluation happens from a background worker after the
+student has gone, so in neither case is there a token to forward.
 
-The grading itself is `EssayGradingService`, unchanged. This module only
-batches, bounds and reports it.
+The separation is the architecture, not a tidying. Generating criteria per
+student meant the grading standard could differ between two people answering
+the same question, and it put a model call between pressing submit and seeing a
+result. Evaluation here takes criteria as input and has no branch that makes
+them: missing criteria is a preparation failure the publish step is supposed to
+have caught.
 """
 
 import asyncio
+import hashlib
 import hmac
+import json
 import logging
 import time
 from decimal import Decimal
@@ -19,33 +24,36 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 
 from app.config import get_settings
+from app.schemas.essay_grading import Criterion
 from app.schemas.exam_grading import (
-    EssayGradingItem, EssayGradingResult, ExamGradingRequest, ExamGradingResponse,
+    CriteriaRequest, CriteriaResponse, EvaluationItem, EvaluationRequest,
+    EvaluationResponse, EvaluationResult,
 )
 from app.services.essay_grading import EssayGradingService, GradingStageError
-from app.services.essay_scoring import IncompleteEvaluation
+from app.services.essay_scoring import IncompleteEvaluation, calculate_score
 
 logger = logging.getLogger(__name__)
 
-# One attempt's essays are graded together, but each is its own pair of model
-# calls, so they run concurrently. The cap keeps a twenty-essay attempt from
-# opening twenty simultaneous model requests and having the provider throttle
-# all of them.
+# One attempt's essays are evaluated together, but each is its own model call,
+# so they run concurrently. The cap stops a twenty-essay attempt opening twenty
+# simultaneous requests and having the provider throttle all of them.
 MAX_CONCURRENCY = 4
 
-# Per-essay ceiling. The product budget is 20s for grading inside a 30s
-# end-to-end target; leaving headroom for the caller's own persistence, an
-# essay that has not come back by this point is reported as needing review
-# rather than holding the attempt open indefinitely.
-PER_ITEM_TIMEOUT_SECONDS = 18.0
+# Per-essay ceiling. Evaluation is now a SINGLE model call — criteria were
+# generated at publish — so this is generous rather than tight.
+PER_ITEM_TIMEOUT_SECONDS = 15.0
+
+# Criteria generation is off the student's path, so it may take longer.
+CRITERIA_TIMEOUT_SECONDS = 40.0
+
+_CREDITED = {"yes", "partial"}
 
 
 def require_internal_caller(x_internal_key: str = Header(default="")):
     """Constant-time check of the service-to-service secret.
 
     `compare_digest` rather than `==`: a plain comparison returns as soon as
-    two bytes differ, and the time it takes leaks how much of the key was
-    right — the same reasoning as the Bunny webhook check.
+    two bytes differ, and how long it took leaks how much of the key was right.
     """
 
     expected = get_settings().require_internal_api_key()
@@ -64,26 +72,96 @@ router = APIRouter(
 )
 
 
-# `yes` is full credit and `partial` is half; `no` and `contradicted` earn
-# nothing. Mirrors STATUS_FACTORS in essay_scoring rather than restating it as
-# a second opinion about what counts as answered.
-_CREDITED = {"yes", "partial"}
+def criteria_hash(criteria: list[Criterion]) -> str:
+    """A content address for one grading standard.
 
-
-def _feedback_from(result) -> str:
-    """A short, student-facing rationale built from the scored criteria.
-
-    Assembled from the deterministic breakdown rather than asked of the model:
-    the breakdown is what the mark was actually computed from, so the words
-    cannot drift from the number. It names the criteria in the grader's own
-    wording — `claim` — because `criterion_id` is "C1" and means nothing to a
-    student. No chain of thought is kept; only which claims were credited.
+    Over the claims in order, not the whole model response: the identifiers are
+    positional and the prose around them is not what a student is marked
+    against. Two attempts showing the same value were marked to the same
+    standard, which is what makes fairness checkable rather than asserted.
     """
 
-    scoring = result.deterministic_scoring
-    parsed = getattr(result.criteria_model, "parsed_response", None)
-    claims = {c.id: c.claim for c in getattr(parsed, "criteria", []) or []}
+    payload = json.dumps(
+        [{"id": c.id, "claim": c.claim} for c in criteria],
+        ensure_ascii=False, separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+
+def _reference_material(data: CriteriaRequest) -> str:
+    """What the criteria are derived from, best material first.
+
+    The marking guide leads because it is the teacher saying how marks are
+    split; the model answer is what a full answer looks like. With neither,
+    the question alone has to carry it and the result is flagged for review.
+    """
+
+    parts = [
+        part for part in (data.marking_guide, data.model_answer, data.teacher_instructions)
+        if part and part.strip()
+    ]
+    return "\n\n".join(parts).strip()
+
+
+@router.post("/criteria", response_model=CriteriaResponse)
+async def generate_criteria(data: CriteriaRequest) -> CriteriaResponse:
+    """Freeze the grading standard for one essay question. Runs at publish."""
+
+    started = time.monotonic()
+    service = EssayGradingService()
+    reference = _reference_material(data)
+    thin = not reference
+
+    try:
+        output = await asyncio.wait_for(
+            service.generate_criteria(data.question, reference or data.question),
+            timeout=CRITERIA_TIMEOUT_SECONDS,
+        )
+    except (TimeoutError, asyncio.TimeoutError):
+        return CriteriaResponse(
+            status="failed", elapsed_ms=int((time.monotonic() - started) * 1000),
+            error="criteria generation timed out",
+        )
+    except GradingStageError as error:
+        return CriteriaResponse(
+            status="failed", elapsed_ms=int((time.monotonic() - started) * 1000),
+            error=str(error),
+        )
+
+    parsed = output.parsed
+    criteria = list(parsed.criteria)
+    if not criteria:
+        return CriteriaResponse(
+            status="failed", elapsed_ms=int((time.monotonic() - started) * 1000),
+            error="the grader returned no criteria",
+        )
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    digest = criteria_hash(criteria)
+    logger.info(
+        "essay_criteria_generated criteria=%s hash=%s thin_material=%s elapsed_ms=%s",
+        len(criteria), digest[:12], thin, elapsed_ms,
+    )
+    return CriteriaResponse(
+        status="ready", criteria=criteria, criteria_hash=digest,
+        needs_review=bool(parsed.needs_review) or thin,
+        review_reason=parsed.review_reason or ("no model answer or marking guide" if thin else None),
+        model_identifier=output.metadata.model_identifier,
+        prompt_version=output.metadata.prompt_version,
+        elapsed_ms=elapsed_ms,
+    )
+
+
+def _feedback_from(criteria: list[Criterion], scoring) -> str:
+    """A short, student-facing rationale built from the scored criteria.
+
+    Assembled from the deterministic breakdown rather than asked of the model,
+    so the words cannot drift from the number, and named with the grader's own
+    wording because `C1` means nothing to a student. No chain of thought is
+    kept — only which claims were credited.
+    """
+
+    claims = {c.id: c.claim for c in criteria}
     met, missed = [], []
     for contribution in scoring.score_breakdown:
         label = claims.get(contribution.criterion_id, contribution.criterion_id)
@@ -97,88 +175,77 @@ def _feedback_from(result) -> str:
     return " — ".join(parts) if parts else "تم تقييم الإجابة."
 
 
-async def _grade_one(
-    service: EssayGradingService, item: EssayGradingItem, gate: asyncio.Semaphore,
-) -> EssayGradingResult:
+async def _evaluate_one(
+    service: EssayGradingService, item: EvaluationItem, gate: asyncio.Semaphore,
+) -> EvaluationResult:
     async with gate:
-        blank = not item.student_answer.strip()
-        if blank:
-            # An unanswered essay is not a grading failure and does not need a
-            # model call. Zero is the honest mark for nothing written, and it
-            # is the one zero this pipeline is allowed to award.
-            return EssayGradingResult(
-                reference=item.reference, status="graded",
-                awarded_score=Decimal("0"), max_score=item.max_points,
-                feedback="لم تُكتب إجابة.", needs_review=False,
+        if not item.student_answer.strip():
+            # An unanswered essay needs no model call. Zero is the honest mark
+            # for nothing written, and it is the only zero this path awards.
+            return EvaluationResult(
+                reference=item.reference, status="graded", awarded_score=Decimal("0"),
+                max_score=item.max_score, feedback="لم تُكتب إجابة.",
+                criteria_hash=item.criteria_hash,
             )
 
-        # Without a model answer the grader has only the question to go on.
-        # It still grades, and the result is flagged for a human.
-        reference_answer = (item.model_answer or "").strip()
-        guide = "\n\n".join(
-            part for part in (item.marking_guide, item.teacher_instructions) if part
-        )
-        if guide:
-            reference_answer = f"{reference_answer}\n\n{guide}".strip()
-        thin = not reference_answer
-
         try:
-            result = await asyncio.wait_for(
-                service.grade(
-                    item.question,
-                    reference_answer or item.question,
-                    item.student_answer,
-                    item.max_points,
+            output = await asyncio.wait_for(
+                service.evaluate_student_answer(
+                    item.question, list(item.criteria), item.student_answer
                 ),
                 timeout=PER_ITEM_TIMEOUT_SECONDS,
             )
+            scoring = calculate_score(
+                list(item.criteria), output.parsed, item.max_score,
+                # The evaluator's own doubt about this answer. Criteria-level
+                # doubt was settled at publish and is the caller's to remember.
+                needs_review=bool(output.parsed.needs_review),
+            )
         except (TimeoutError, asyncio.TimeoutError):
-            return EssayGradingResult(
-                reference=item.reference, status="failed", max_score=item.max_points,
-                needs_review=True, error="grading timed out",
+            return EvaluationResult(
+                reference=item.reference, status="failed", max_score=item.max_score,
+                needs_review=True, criteria_hash=item.criteria_hash,
+                error="evaluation timed out",
             )
-        except (GradingStageError, IncompleteEvaluation) as error:
-            return EssayGradingResult(
-                reference=item.reference, status="failed", max_score=item.max_points,
-                needs_review=True, error=str(error),
-            )
-
-        scoring = result.deterministic_scoring
-        if result.run_status != "completed" or scoring is None:
-            return EssayGradingResult(
-                reference=item.reference, status="failed", max_score=item.max_points,
-                needs_review=True, error=result.error or "grading did not complete",
+        except (GradingStageError, IncompleteEvaluation, ValueError) as error:
+            return EvaluationResult(
+                reference=item.reference, status="failed", max_score=item.max_score,
+                needs_review=True, criteria_hash=item.criteria_hash, error=str(error),
             )
 
         awarded = Decimal(scoring.score)
-        # Clamped here as well as validated by the caller. The scorer derives
-        # the mark arithmetically so it should already be in range; a bound
-        # that is only checked in one place is a bound that eventually is not.
-        awarded = max(Decimal("0"), min(awarded, item.max_points))
+        # Clamped as well as derived. The scorer computes the mark
+        # arithmetically so it should already be in range; a bound checked in
+        # only one place is a bound that eventually is not.
+        awarded = max(Decimal("0"), min(awarded, item.max_score))
 
-        return EssayGradingResult(
+        return EvaluationResult(
             reference=item.reference, status="graded", awarded_score=awarded,
-            max_score=item.max_points, feedback=_feedback_from(result),
-            needs_review=bool(scoring.needs_review) or thin,
+            max_score=item.max_score,
+            feedback=_feedback_from(list(item.criteria), scoring),
+            needs_review=bool(scoring.needs_review),
+            criteria_hash=item.criteria_hash,
         )
 
 
-@router.post("", response_model=ExamGradingResponse)
-async def grade_attempt(data: ExamGradingRequest) -> ExamGradingResponse:
+@router.post("/evaluate", response_model=EvaluationResponse)
+async def evaluate_attempt(data: EvaluationRequest) -> EvaluationResponse:
+    """Mark every essay on one attempt against its frozen criteria."""
+
     started = time.monotonic()
     service = EssayGradingService()
     gate = asyncio.Semaphore(MAX_CONCURRENCY)
 
     results = await asyncio.gather(
-        *(_grade_one(service, item, gate) for item in data.items)
+        *(_evaluate_one(service, item, gate) for item in data.items)
     )
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     graded = sum(1 for r in results if r.status == "graded")
     logger.info(
-        "essay_grading_completed attempt_id=%s items=%s graded=%s failed=%s elapsed_ms=%s",
+        "essay_evaluation_completed attempt_id=%s items=%s graded=%s failed=%s elapsed_ms=%s",
         data.attempt_id, len(results), graded, len(results) - graded, elapsed_ms,
     )
-    return ExamGradingResponse(
+    return EvaluationResponse(
         attempt_id=data.attempt_id, results=list(results), elapsed_ms=elapsed_ms,
     )
