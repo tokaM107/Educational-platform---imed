@@ -26,7 +26,13 @@ class Criterion(StrictLLMModel):
     # the deterministic scorer can weight by them. They are never put in a
     # prompt - the model judges whether a claim was met, and how much that is
     # worth is not its business.
-    marks: Decimal | None = Field(default=None, ge=0, le=1000)
+    # strict=False for this field alone: the enclosing model is strict because
+    # it also parses LLM output, where a string where a number belongs is a
+    # malformed answer worth rejecting. But this field never comes from the
+    # model - it arrives on the wire as ordinary JSON, where a whole number is
+    # an int and no client would think to send a Decimal. Strictness here
+    # rejected every real evaluation request with the marks attached.
+    marks: Decimal | None = Field(default=None, ge=0, le=1000, strict=False)
 
 
 class CriteriaGenerationResult(StrictLLMModel):

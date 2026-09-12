@@ -69,7 +69,14 @@ def build_evaluator_prompt(
     return json.dumps(
         {
             "question": question,
-            "criteria": [criterion.model_dump() for criterion in criteria],
+            # `marks` is excluded, and not only because a Decimal is not JSON
+            # serializable. The model judges whether a claim was met; what that
+            # claim is worth is the teacher's allocation and none of its
+            # business. Telling it the weights invites it to grade the total
+            # rather than the claim.
+            "criteria": [
+                criterion.model_dump(exclude={"marks"}) for criterion in criteria
+            ],
             "student_answer": student_answer,
         },
         ensure_ascii=False,

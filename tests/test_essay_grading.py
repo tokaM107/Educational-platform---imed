@@ -9,6 +9,7 @@ from app.schemas.essay_grading import (
 )
 from app.services import essay_scoring
 from app.services.essay_grading import EssayGradingService, provider_response_schema
+from app.services.essay_grading_prompts import build_evaluator_prompt
 from app.services.essay_scoring import IncompleteEvaluation, calculate_score
 from app.services.llm import GeneratedReply
 
@@ -311,3 +312,35 @@ def test_partial_allocation_falls_back_rather_than_guessing():
     scoring = calculate_score(criteria, _evaluation("yes", "no"), Decimal("6"))
     # Equal split: 3 of 6, not the 4 the lone allocation would have given.
     assert Decimal(scoring.score) == Decimal("3.00")
+
+
+def test_marks_accept_a_plain_json_number():
+    """The wire sends `2`, not `Decimal("2")`, and that must be accepted.
+
+    The enclosing model is strict because it also parses LLM output, where a
+    string where a number belongs is a malformed answer worth rejecting. But
+    `marks` never comes from the model -- it arrives as ordinary JSON from the
+    backend, and strictness there rejected every real evaluation request that
+    carried the teacher's allocation, with a 422 the caller read as "the
+    grading service is down".
+    """
+    criterion = Criterion.model_validate({"id": "C1", "claim": "شيء", "marks": 2})
+
+    assert criterion.marks == Decimal("2")
+
+
+def test_the_evaluator_prompt_never_carries_the_teacher_marks():
+    """The model judges whether a claim was met, not what it is worth.
+
+    Telling it the weights invites it to grade toward a total rather than
+    against the claim, and the allocation is the teacher's decision either way.
+    """
+    prompt = build_evaluator_prompt(
+        "سؤال",
+        [Criterion(id="C1", claim="ادعاء", marks=Decimal("3"))],
+        "إجابة",
+    )
+
+    assert "ادعاء" in prompt
+    assert "marks" not in prompt
+    assert "3" not in prompt
