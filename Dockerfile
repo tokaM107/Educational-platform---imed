@@ -33,8 +33,7 @@ RUN python -m pip install --no-cache-dir --requirement requirements-prod.txt
 # ffmpeg, the media has started flowing the wrong way.
 COPY app ./app
 COPY rag/__init__.py rag/bunny.py rag/chunking.py rag/ingest.py \
-     rag/media_url.py rag/transcribe_runpod.py rag/transcript_format.py \
-     rag/worker.py ./rag/
+     rag/media_url.py rag/transcribe_runpod.py rag/worker.py ./rag/
 COPY search-assistant ./search-assistant
 
 USER appuser
