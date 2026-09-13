@@ -32,7 +32,6 @@ COPY rag/__init__.py \
      rag/ingest.py \
      rag/media_url.py \
      rag/transcribe_runpod.py \
-     rag/transcript_format.py \
      rag/worker.py \
      ./rag/
 
