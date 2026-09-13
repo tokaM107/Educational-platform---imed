@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="312" viewBox="0 0 880 312" font-family='system-ui,-apple-system,"Segoe UI",Roboto,sans-serif'>
+<rect width="880" height="312" rx="10" fill="#1a1a19"/>
+<rect x="0.5" y="0.5" width="879" height="311" rx="9.5" fill="none" stroke="rgba(255,255,255,0.10)"/>
+<text x="28" y="38" fill="#ffffff" font-size="19" font-weight="650" text-anchor="start">How the relevance cut-off was chosen</text>
+<text x="28" y="60" fill="#c3c2b7" font-size="12" font-weight="400" text-anchor="start">Cosine distance between a question and a transcript chunk, measured on the reference lecture. Lower = closer.</text>
+<rect x="28" y="78" width="11" height="11" rx="3" fill="#3987e5"/>
+<text x="45" y="88" fill="#c3c2b7" font-size="12" font-weight="400" text-anchor="start">Genuine answers</text>
+<rect x="168" y="78" width="11" height="11" rx="3" fill="#d95926"/>
+<text x="185" y="88" fill="#c3c2b7" font-size="12" font-weight="400" text-anchor="start">Unrelated chunks</text>
+<text x="504.1666666666667" y="118" fill="#ffffff" font-size="12.5" font-weight="650" text-anchor="middle">MAX_DISTANCE = 0.45</text>
+<line x1="504.2" y1="124" x2="504.2" y2="232" stroke="#ffffff" stroke-width="2" stroke-dasharray="5 4"/>
+<rect x="232.0" y="134" width="94.7" height="44" rx="5" fill="#3987e5"/>
+<text x="279.3333333333333" y="161.0" fill="#ffffff" font-size="12.5" font-weight="650" text-anchor="middle">0.22 – 0.30</text>
+<rect x="563.3" y="134" width="236.7" height="44" rx="5" fill="#d95926"/>
+<text x="681.6666666666667" y="161.0" fill="#ffffff" font-size="12.5" font-weight="650" text-anchor="middle">0.50 and beyond</text>
+<line x1="326.7" y1="194" x2="504.2" y2="194" stroke="#898781" stroke-dasharray="3 3"/>
+<text x="415.41666666666663" y="209" fill="#898781" font-size="11" font-weight="400" text-anchor="middle">headroom</text>
+<line x1="90" y1="232" x2="800" y2="232" stroke="#383835"/>
+<line x1="90.0" y1="232" x2="90.0" y2="237" stroke="#383835"/>
+<text x="90.0" y="252" fill="#898781" font-size="11" font-weight="400" text-anchor="middle">0.10</text>
+<line x1="208.3" y1="232" x2="208.3" y2="237" stroke="#383835"/>
+<text x="208.33333333333334" y="252" fill="#898781" font-size="11" font-weight="400" text-anchor="middle">0.20</text>
+<line x1="326.7" y1="232" x2="326.7" y2="237" stroke="#383835"/>
+<text x="326.66666666666663" y="252" fill="#898781" font-size="11" font-weight="400" text-anchor="middle">0.30</text>
+<line x1="445.0" y1="232" x2="445.0" y2="237" stroke="#383835"/>
+<text x="445.00000000000006" y="252" fill="#898781" font-size="11" font-weight="400" text-anchor="middle">0.40</text>
+<line x1="563.3" y1="232" x2="563.3" y2="237" stroke="#383835"/>
+<text x="563.3333333333334" y="252" fill="#898781" font-size="11" font-weight="400" text-anchor="middle">0.50</text>
+<line x1="681.7" y1="232" x2="681.7" y2="237" stroke="#383835"/>
+<text x="681.6666666666667" y="252" fill="#898781" font-size="11" font-weight="400" text-anchor="middle">0.60</text>
+<line x1="800.0" y1="232" x2="800.0" y2="237" stroke="#383835"/>
+<text x="800.0" y="252" fill="#898781" font-size="11" font-weight="400" text-anchor="middle">0.70</text>
+<text x="28" y="288" fill="#c3c2b7" font-size="12.5" font-weight="500" text-anchor="start">Set between the two populations, not guessed. Past the line the tutor says the lecture does not cover it.</text>
+</svg>

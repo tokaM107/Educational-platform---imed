@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="356" viewBox="0 0 880 356" font-family='system-ui,-apple-system,"Segoe UI",Roboto,sans-serif'>
+<rect width="880" height="356" rx="10" fill="#fcfcfb"/>
+<rect x="0.5" y="0.5" width="879" height="355" rx="9.5" fill="none" stroke="rgba(11,11,11,0.10)"/>
+<text x="28" y="38" fill="#0b0b0b" font-size="19" font-weight="650" text-anchor="start">Where the AI bill goes</text>
+<text x="28" y="60" fill="#52514e" font-size="12.5" font-weight="400" text-anchor="start">Monthly cost at 5,000 active students/day — planning scenario, USD</text>
+<text x="236" y="119.5" fill="#0b0b0b" font-size="13" font-weight="600" text-anchor="end">Conversational tutor</text>
+<rect x="250.0" y="100" width="400.0" height="30" rx="4" fill="#2a78d6"/>
+<text x="660.0" y="119.5" fill="#0b0b0b" font-size="12.5" font-weight="600" text-anchor="start">$1,192.84  ·  79.6%</text>
+<text x="236" y="163.5" fill="#52514e" font-size="13" font-weight="400" text-anchor="end">Search assistant</text>
+<rect x="250.0" y="144" width="62.9" height="30" rx="4" fill="#898781"/>
+<text x="322.8751550920492" y="163.5" fill="#52514e" font-size="12.5" font-weight="400" text-anchor="start">$187.50  ·  12.5%</text>
+<text x="236" y="207.5" fill="#52514e" font-size="13" font-weight="400" text-anchor="end">Essay grading</text>
+<rect x="250.0" y="188" width="21.2" height="30" rx="4" fill="#898781"/>
+<text x="281.19982562623653" y="207.5" fill="#52514e" font-size="12.5" font-weight="400" text-anchor="start">$63.22  ·  4.2%</text>
+<text x="236" y="251.5" fill="#52514e" font-size="13" font-weight="400" text-anchor="end">Reports</text>
+<rect x="250.0" y="232" width="18.1" height="30" rx="4" fill="#898781"/>
+<text x="278.1080446665102" y="251.5" fill="#52514e" font-size="12.5" font-weight="400" text-anchor="start">$54.00  ·  3.6%</text>
+<text x="236" y="295.5" fill="#52514e" font-size="13" font-weight="400" text-anchor="end">Transcription + ingestion</text>
+<rect x="250.0" y="276" width="3.0" height="30" rx="4" fill="#898781"/>
+<text x="263" y="295.5" fill="#52514e" font-size="12.5" font-weight="400" text-anchor="start">$0.21  ·  &lt;0.1%</text>
+<line x1="250" y1="92" x2="250" y2="314" stroke="#c3c2b7"/>
+<text x="28" y="330" fill="#52514e" font-size="12.5" font-weight="500" text-anchor="start">The tutor is 80% of the bill — cost control starts and ends there.</text>
+</svg>
