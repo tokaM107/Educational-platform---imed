@@ -39,11 +39,10 @@ mdurl==0.1.2
 # unconditional pin here fails the whole install on any Linux host -- which is
 # what broke the Coolify deployment of the transcription worker.
 #
-# Nothing in this repository imports mlx: it is left over from a local
-# Whisper experiment, and rag/transcribe_whisper.py (itself superseded, and
-# excluded from both images) uses huggingface_hub rather than MLX. The markers
-# keep it installable on a Mac for that kind of local work without it ever
-# being a production dependency.
+# Nothing in this repository imports mlx: it is left over from a local Whisper
+# experiment whose script has since been deleted. The markers keep it
+# installable on a Mac for that kind of local work without it ever being a
+# production dependency.
 mlx==0.32.0; sys_platform == "darwin"
 mlx-metal==0.32.0; sys_platform == "darwin"
 mlx-whisper==0.4.3; sys_platform == "darwin"
