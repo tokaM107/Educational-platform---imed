@@ -384,11 +384,9 @@ Tests: `test_transcription_worker.py`, `test_transcribe_runpod.py`,
 ---
 
 ## 4. Essay / exam AI grading
-
-<!-- SCREENSHOT: add docs/images/essay-grading.png then uncomment the two lines below
 ![Grading output: per-criterion verdicts with evidence, and the computed mark](docs/images/essay-grading.png)
 <sub>Grading output: per-criterion verdicts with evidence, and the computed mark</sub>
--->
+
 
 A student writes a free-text answer to an essay question. The service marks it
 against the teacher's model answer, and returns a score with a per-point
@@ -441,9 +439,19 @@ to anchor on.
 | `no` | 0.0 |
 | `contradicted` | 0.0 |
 
-Score = Σ (weight × factor) × total marks, rounded to two decimal places with
-`ROUND_HALF_UP`. Given the same criteria and the same statuses, the mark is
-reproducible forever — it does not depend on a model call at all.
+The model's weights become marks **outside this service**: the caller
+multiplies them by the question's total (a 5-mark question with weights
+0.4/0.35/0.25 becomes 2/1.75/1.25) and sends those per-criterion `marks` on the
+evaluation request. The scorer then computes `Σ (marks × factor)`, capped at the
+maximum and rounded to two places with `ROUND_HALF_UP`.
+
+When marks are absent — the prototype path, and any freshly generated rubric a
+teacher has not reviewed — it falls back to an equal split of the total and the
+model's weights are not used. Partial allocations fall back too, rather than
+guessing at the missing ones.
+
+Either way the mark is reproducible forever: given the same criteria and the
+same statuses it does not depend on a model call at all.
 
 ### What the prompts enforce
 
@@ -474,6 +482,10 @@ become a partial mark. Either stage can set `needs_review=true` with a reason
 for automatic grading), which routes the attempt to a human instead of writing a
 mark.
 
+![A graded essay answer as the student sees it, with the per-criterion feedback](docs/images/essay-grading-student-view.png)
+<sub>The same grading run as the student receives it: the mark, which criteria
+were met, and the reference explanation.</sub>
+
 ### Where it sits between the services
 
 NestJS calls `POST /api/internal/exam-grading` with a **shared secret of at least
@@ -496,10 +508,10 @@ Design: [docs/ESSAY_GRADING_MVP.md](docs/ESSAY_GRADING_MVP.md),
 
 ## 5. Learning analytics
 
-<!-- SCREENSHOT: add docs/images/learning-analytics.png then uncomment the two lines below
-![Mastery and engagement for one student, with the confidence label](docs/images/learning-analytics.png)
-<sub>Mastery and engagement for one student, with the confidence label</sub>
--->
+![Mastery and engagement for one student, with per-lecture coverage and watch time](docs/images/learning-analytics.png)
+<sub>Understanding and mastery for one student — checkpoint accuracy, per-topic
+breakdown, and per-lecture coverage against watch time.</sub>
+
 
 How much of a course a student has actually learned, and how confident we are in
 that claim.
@@ -573,10 +585,10 @@ Docs: [docs/LEARNING_ANALYTICS_VALIDATION.md](docs/LEARNING_ANALYTICS_VALIDATION
 
 ## 6. Reports — weekly and event-triggered
 
-<!-- SCREENSHOT: add docs/images/weekly-report.png then uncomment the two lines below
 ![A generated weekly report as the student and their teacher receive it](docs/images/weekly-report.png)
-<sub>A generated weekly report as the student and their teacher receive it</sub>
--->
+<sub>Stage 1: the measured week — watch time, study days, coverage and the
+four-week trend, each figure next to what it is measured against.</sub>
+
 
 One student, one course, seven days: what they watched, what they answered, and
 what they should do next — written in Arabic as prose a parent or a teacher can
@@ -627,6 +639,10 @@ not a report was generated.
 Reports a completion froze are stored as issued and never regenerated —
 what a student was told last month must keep saying what it said.
 
+![The generated narrative: what went well, what needs fixing, and what to do next](docs/images/weekly-report-narrative.png)
+<sub>Stage 2: the model narrates those figures — what went well, what needs
+fixing, where to restart, and the next steps. It never computes a number.</sub>
+
 **Files and tests.** `app/services/report.py`, `report_learning.py`,
 `report_cache.py`, `report_store.py`, `triggers.py`, `notifications.py` ·
 `app/api/reports.py`, `notifications.py` ·
@@ -637,10 +653,9 @@ CLI: `scripts/generate_weekly_reports.py`
 
 ## 7. Search assistant
 
-<!-- SCREENSHOT: add docs/images/search-assistant.png then uncomment the two lines below
 ![Natural-language search resolving an Arabic sentence to the right courses](docs/images/search-assistant.png)
 <sub>Natural-language search resolving an Arabic sentence to the right courses</sub>
--->
+
 
 A student types *"عايز كورسات دكتور أحمد للسنة التانية"* and gets the right
 courses — no filter dropdowns, no exact spelling, Arabic or English.
