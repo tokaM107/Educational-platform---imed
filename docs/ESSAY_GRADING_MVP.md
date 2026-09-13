@@ -20,12 +20,29 @@ is zero. Pydantic rejects invalid structures, duplicate IDs, missing results, an
 unknown result IDs. One retry is made when an otherwise successful provider reply
 does not validate.
 
-The LLM never calculates points. Python assigns equal criterion weight:
+The LLM never calculates points. It proposes each criterion's **relative
+importance as a share of 1.0** (`weight`), and Python turns judgements into a
+mark. Two weighting paths exist, and which one applies depends on what the
+caller supplies:
 
 ```text
-weight = max_points / generated_criterion_count
-yes = 1.0, partial = 0.5, no = 0.0, contradicted = 0.0
+status factors:  yes = 1.0, partial = 0.5, no = 0.0, contradicted = 0.0
+
+# 1. Teacher allocations — used when EVERY criterion carries `marks`.
+#    The caller converts the model's weights against the question's total
+#    (a 5-mark question with weights 0.4/0.35/0.25 becomes 2/1.75/1.25)
+#    and sends those marks on the evaluation request.
+score = Σ (marks × status_factor)
+
+# 2. Equal split — the fallback when marks are absent or only partial.
+#    This is the prototype path, and a freshly generated proposal before a
+#    teacher has reviewed it. The model's weights are NOT used here.
+weight = max_points / criterion_count
+score  = Σ (weight × status_factor)
 ```
+
+Mixed or partial allocations fall back to the equal split rather than guessing
+at the missing ones.
 
 Calculations use `Decimal`, round half-up to two places, and are capped to the
 configured maximum. A review flag preserves a provisional score; malformed or
@@ -90,7 +107,10 @@ created or committed unless an output path is explicitly supplied.
 
 ## Known limitations
 
-- Equal weighting cannot represent differing clinical importance.
+- The equal-split fallback cannot represent differing clinical importance.
+  Weighted scoring addresses this, but only when the caller converts the
+  model's weights into per-criterion marks and sends them back; nothing in
+  this service performs that conversion.
 - Criteria decomposition is itself model-dependent and may change expected score
   granularity.
 - The prototype has no calibration, inter-rater study, or validated acceptance
