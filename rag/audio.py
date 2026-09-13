@@ -1,7 +1,7 @@
 """Video (local file or URL) -> 16 kHz mono wav -> fixed-length chunks.
 
-This is the stage that used to live as loose statements at the top of
-rag/transcribe_whisper.py, where the video was a module-level constant pointing
+This is the stage that used to live as loose statements at the top of the
+original Whisper script, where the video was a module-level constant pointing
 at data/videos/sample1.mp4. Pulled out into functions so that the source can be
 an argument — which is the whole of what "read the video from Bunny instead of
 from disk" requires, once the source is something you can pass.
