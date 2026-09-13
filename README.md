@@ -87,6 +87,7 @@ ingestion pipeline and the cost model underneath them.
 ## The platform in one picture
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#2a78d6','primaryTextColor':'#ffffff','primaryBorderColor':'#1f66bb','secondaryColor':'#6b7280','secondaryTextColor':'#ffffff','secondaryBorderColor':'#4b5563','tertiaryColor':'#eb6834','tertiaryTextColor':'#ffffff','tertiaryBorderColor':'#c44d22','lineColor':'#8b8f94','textColor':'#111418','edgeLabelBackground':'#4b5563'}}}%%
 flowchart TB
     U[Student / Teacher / Admin<br/>Next.js frontend] --> N[NestJS API<br/>auth, payments, catalog]
     U -->|chat, search, reports| A[AI service<br/>FastAPI · this repo]
@@ -166,6 +167,7 @@ stopped at the flag** — the student can keep watching straight past it.
 ### The pipeline
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#2a78d6','primaryTextColor':'#ffffff','primaryBorderColor':'#1f66bb','secondaryColor':'#6b7280','secondaryTextColor':'#ffffff','secondaryBorderColor':'#4b5563','tertiaryColor':'#eb6834','tertiaryTextColor':'#ffffff','tertiaryBorderColor':'#c44d22','lineColor':'#8b8f94','textColor':'#111418','edgeLabelBackground':'#4b5563'}}}%%
 flowchart LR
     Q[student question] --> C[1. contextualize]
     C --> E[2. embed + retrieve]
@@ -302,6 +304,7 @@ Bunny finishes encoding, it calls this service, and a transcript exists a few
 minutes later.
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#2a78d6','primaryTextColor':'#ffffff','primaryBorderColor':'#1f66bb','secondaryColor':'#6b7280','secondaryTextColor':'#ffffff','secondaryBorderColor':'#4b5563','tertiaryColor':'#eb6834','tertiaryTextColor':'#ffffff','tertiaryBorderColor':'#c44d22','lineColor':'#8b8f94','textColor':'#111418','edgeLabelBackground':'#4b5563'}}}%%
 flowchart LR
     UP[doctor uploads to Bunny] --> ENC[Bunny encodes]
     ENC -->|webhook + URL secret| API[POST /api/webhooks/bunny<br/>queue a job]
@@ -397,6 +400,7 @@ wrong mark is not a bad UX — it is a wrong grade on a real student's record.
 ### Two stages, on purpose
 
 ```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#2a78d6','primaryTextColor':'#ffffff','primaryBorderColor':'#1f66bb','secondaryColor':'#6b7280','secondaryTextColor':'#ffffff','secondaryBorderColor':'#4b5563','tertiaryColor':'#eb6834','tertiaryTextColor':'#ffffff','tertiaryBorderColor':'#c44d22','lineColor':'#8b8f94','textColor':'#111418','edgeLabelBackground':'#4b5563'}}}%%
 flowchart LR
     Q[question + model answer] --> S1[Stage 1: Criteria Generator<br/>LLM]
     S1 --> C[criteria C1..Cn<br/>each with a weight, summing to 1.0]
