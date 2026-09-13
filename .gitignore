@@ -233,7 +233,7 @@ supabase_restore.sql
 *.dump
 
 # Local Supabase CLI state and the separate database source repository.
-/supabase/.temp/
+/supabase/
 /way2APlus_db/
 
 # Local transcription experiments. Media staged at the repo root rather than
