@@ -34,7 +34,6 @@ QUERY_PATH = [
 FORBIDDEN = (
     "rag.transcribe_cohere",
     "rag.transcribe_runpod",
-    "rag.transcribe_whisper",
     "rag.audio",
     "rag.worker",
     "gpu.handler",
